@@ -1,0 +1,127 @@
+package builder_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/blobscan/blobscan-ipld/builder"
+	"github.com/blobscan/blobscan-ipld/store"
+	"github.com/blobscan/blobscan-ipld/types"
+)
+
+func buildTestEpoch(t *testing.T, epoch uint64, blobCount int) (types.EpochResult, *store.MemBlockstore) {
+	t.Helper()
+	ctx := context.Background()
+	bs := store.NewMemBlockstore()
+	lsys := store.NewLinkSystem(bs)
+
+	blobs := make([]types.BlobInput, blobCount)
+	for i := range blobs {
+		blobs[i] = makeTestBlob(
+			"0x"+padHex(uint64(i+1), 8),
+			epoch,
+			epoch*32,
+			i,
+		)
+	}
+
+	results := make([]types.BlobResult, blobCount)
+	for i, b := range blobs {
+		res, err := builder.ProcessBlob(ctx, lsys, b)
+		if err != nil {
+			t.Fatalf("ProcessBlob %d: %v", i, err)
+		}
+		results[i] = res
+	}
+
+	inp := types.EpochInput{Epoch: epoch, Slot: epoch * 32, Blobs: blobs}
+	epochResult, err := builder.BuildEpochNode(ctx, lsys, inp, results, "mainnet", 5000)
+	if err != nil {
+		t.Fatalf("BuildEpochNode: %v", err)
+	}
+
+	return epochResult, bs
+}
+
+// padHex returns a hex string of n padded to width digits.
+func padHex(n uint64, width int) string {
+	s := ""
+	for n > 0 {
+		s = string(rune("0123456789abcdef"[n%16])) + s
+		n /= 16
+	}
+	for len(s) < width {
+		s = "0" + s
+	}
+	return s
+}
+
+// TestBuildEpochNode verifies determinism and basic structure.
+func TestBuildEpochNode(t *testing.T) {
+	res1, _ := buildTestEpoch(t, 100, 3)
+	res2, _ := buildTestEpoch(t, 100, 3)
+
+	if res1.CID != res2.CID {
+		t.Errorf("EpochNode CID not deterministic: %s != %s", res1.CID, res2.CID)
+	}
+	if res1.Epoch != 100 {
+		t.Errorf("Epoch: got %d, want 100", res1.Epoch)
+	}
+	if res1.ApproximateSizeBytes == 0 {
+		t.Error("ApproximateSizeBytes should be > 0")
+	}
+}
+
+// TestBuildEpochNodeDifferentEpochs verifies that different epochs produce
+// different CIDs even with the same blobs.
+func TestBuildEpochNodeDifferentEpochs(t *testing.T) {
+	res1, _ := buildTestEpoch(t, 100, 2)
+	res2, _ := buildTestEpoch(t, 101, 2)
+
+	if res1.CID == res2.CID {
+		t.Error("different epochs must produce different CIDs")
+	}
+}
+
+// TestBuildRangeNode verifies that a range node is built correctly from
+// multiple epoch results.
+func TestBuildRangeNode(t *testing.T) {
+	ctx := context.Background()
+
+	epochResults := make([]types.EpochResult, 3)
+	bsMap := make(map[uint64]*store.MemBlockstore)
+
+	for i := range epochResults {
+		epoch := uint64(100 + i)
+		res, bs := buildTestEpoch(t, epoch, 2)
+		epochResults[i] = res
+		bsMap[epoch] = bs
+	}
+
+	rangeBS, rangeResult, err := builder.BuildRangeNodeWithStore(ctx, "mainnet", epochResults, bsMap)
+	if err != nil {
+		t.Fatalf("BuildRangeNodeWithStore: %v", err)
+	}
+
+	if rangeResult.FirstEpoch != 100 {
+		t.Errorf("FirstEpoch: got %d, want 100", rangeResult.FirstEpoch)
+	}
+	if rangeResult.LastEpoch != 102 {
+		t.Errorf("LastEpoch: got %d, want 102", rangeResult.LastEpoch)
+	}
+	if rangeResult.CID.String() == "" {
+		t.Error("RangeNode CID should not be empty")
+	}
+	if rangeBS.Len() == 0 {
+		t.Error("range blockstore should not be empty")
+	}
+
+	// Determinism check.
+	_, rangeResult2, err := builder.BuildRangeNodeWithStore(ctx, "mainnet", epochResults, bsMap)
+	if err != nil {
+		t.Fatalf("BuildRangeNodeWithStore (2nd): %v", err)
+	}
+	if rangeResult.CID != rangeResult2.CID {
+		t.Errorf("RangeNode CID not deterministic: %s != %s", rangeResult.CID, rangeResult2.CID)
+	}
+}

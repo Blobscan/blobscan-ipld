@@ -1,0 +1,21 @@
+network:
+  name: mainnet
+  beacon_rpc: "http://localhost:5052"
+
+ipfs:
+  api_addr: "/ip4/127.0.0.1/tcp/5001"
+  pin_on_add: true
+  timeout: 30s
+
+storage:
+  data_dir: "/var/lib/blobscan-ipld/mainnet"
+  car_dir: "/var/lib/blobscan-ipld/mainnet/car"
+  postgres_dsn: "postgres://user:password@localhost:5432/blobscan?sslmode=disable"
+
+generator:
+  hamt_threshold: 5000
+  poll_interval: 12s
+  start_epoch: 0
+  workers: 8
+  skip_existing_epochs: true
+  api_listen: ":8080"  # address for the HTTP push API; remove or leave empty to disable

@@ -1,0 +1,52 @@
+## Blobscan IPLD Schema
+## All maps use string keys sorted lexicographically for determinism.
+## Each epoch is exported as an independent self-contained CAR v2 file.
+## The epoch CID and per-blob CIDs are persisted to PostgreSQL.
+
+# ─── Epoch Node ──────────────────────────────────────────────────────────────
+type EpochNode struct {
+  epoch               Int
+  slot                Int
+  network             String
+  blobIndex           BlobIndex
+  approximateSizeBytes Int
+}
+
+# ─── Blob Index (inline union: simple map or HAMT link) ──────────────────────
+type BlobIndex union {
+  | BlobMap    "map"
+  | &HAMTShard "hamt"
+} representation keyed
+
+type BlobMap struct {
+  blobs {String : &BlobMetadata}   # key = blob commitment (hex)
+}
+
+# ─── Blob Metadata ───────────────────────────────────────────────────────────
+type BlobMetadata struct {
+  commitment          String        # KZG commitment hex
+  versionedHash       String        # EIP-4844 versioned hash hex
+  txHash              String        # transaction hash hex
+  blockNumber         Int
+  blockHash           String
+  slot                Int
+  epoch               Int
+  index               Int           # blob index within tx
+  size                Int           # raw blob size in bytes
+  data                &Blob
+}
+
+# ─── Raw Blob ─────────────────────────────────────────────────────────────────
+# Stored with codec=raw; the CID is the sha2-256 of the raw 128KB blob field.
+type Blob bytes
+
+# ─── HAMT Shard (simplified; real impl uses go-ipld-adl-hamt) ───────────────
+type HAMTShard struct {
+  bitfield  Bytes
+  pointers  [HAMTPointer]
+}
+
+type HAMTPointer union {
+  | &HAMTShard  "shard"
+  | &BlobMetadata "value"
+} representation keyed
