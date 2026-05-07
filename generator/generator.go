@@ -169,22 +169,61 @@ func (g *Generator) processNewEpochs(ctx context.Context) error {
 
 // processEpoch handles a single finalized epoch end-to-end (beacon-pull mode):
 // fetch → build blobs → build epoch node → upload IPFS → rebuild NetworkRoot → save DB.
+// If blobs for this epoch already exist in the DB (e.g. from a previous interrupted run),
+// the beacon fetch and blob processing are skipped entirely.
 func (g *Generator) processEpoch(ctx context.Context, epoch uint64) error {
 	g.log.Info("processing epoch", "epoch", epoch)
 
-	epochInp, err := g.beacon.FetchEpochInput(ctx, epoch, nil)
-	if err != nil {
-		return fmt.Errorf("fetch epoch %d: %w", epoch, err)
+	var (
+		epochInp    types.EpochInput
+		blobResults []types.BlobResult
+		epochBS     *store.MemBlockstore
+		fromCache   bool
+	)
+
+	// Check DB for blobs already processed in a previous run.
+	if g.db != nil {
+		cached, err := g.db.GetBlobsByEpoch(ctx, epoch)
+		if err != nil {
+			return fmt.Errorf("check cached blobs epoch %d: %w", epoch, err)
+		}
+		if len(cached) > 0 {
+			g.log.Info("using cached blobs from DB, skipping beacon fetch",
+				"epoch", epoch, "blobs", len(cached))
+			epochInp, blobResults, err = g.reconstructFromDB(epoch, cached)
+			if err != nil {
+				return fmt.Errorf("reconstruct epoch %d from DB: %w", epoch, err)
+			}
+			epochBS = store.NewMemBlockstore()
+			fromCache = true
+		}
 	}
 
-	if len(epochInp.Blobs) == 0 {
-		g.log.Info("epoch has no blobs, skipping", "epoch", epoch)
-		return g.state.SetLastProcessedEpoch(ctx, epoch)
-	}
+	if !fromCache {
+		g.log.Info("fetching blobs from beacon", "epoch", epoch)
+		var err error
+		epochInp, err = g.beacon.FetchEpochInput(ctx, epoch, nil)
+		if err != nil {
+			return fmt.Errorf("fetch epoch %d: %w", epoch, err)
+		}
 
-	epochBS, blobResults, err := g.processEpochBlobs(ctx, epochInp)
-	if err != nil {
-		return fmt.Errorf("process blobs epoch %d: %w", epoch, err)
+		if len(epochInp.Blobs) == 0 {
+			g.log.Info("epoch has no blobs, skipping", "epoch", epoch)
+			return g.state.SetLastProcessedEpoch(ctx, epoch)
+		}
+
+		g.log.Info("blobs fetched from beacon",
+			"epoch", epoch,
+			"blobs", len(epochInp.Blobs),
+			"first_slot", epochInp.Slot,
+			"last_slot", epochInp.Slot+31,
+		)
+
+		g.log.Info("processing blobs", "epoch", epoch, "blobs", len(epochInp.Blobs))
+		epochBS, blobResults, err = g.processEpochBlobs(ctx, epochInp)
+		if err != nil {
+			return fmt.Errorf("process blobs epoch %d: %w", epoch, err)
+		}
 	}
 
 	lsys := store.NewLinkSystem(epochBS)
@@ -210,19 +249,66 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64) error {
 	}
 
 	if g.db != nil {
-		if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults); err != nil {
-			return fmt.Errorf("save blobs epoch %d to db: %w", epoch, err)
-		}
+		g.log.Info("saving to database", "epoch", epoch, "blobs", len(blobResults))
 		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobResults)); err != nil {
 			return fmt.Errorf("save epoch %d to db: %w", epoch, err)
 		}
+		if !fromCache {
+			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults); err != nil {
+				return fmt.Errorf("save blobs epoch %d to db: %w", epoch, err)
+			}
+		}
 	}
 
+	g.log.Info("rebuilding network root", "epoch", epoch)
 	if err := g.rebuildNetworkRoot(ctx); err != nil {
 		g.log.Warn("network root rebuild failed (non-fatal)", "epoch", epoch, "err", err)
 	}
 
+	g.log.Info("epoch complete", "epoch", epoch)
 	return g.state.SetLastProcessedEpoch(ctx, epoch)
+}
+
+// reconstructFromDB rebuilds EpochInput and BlobResult slices from DB records,
+// avoiding a full beacon re-fetch. The raw blob Data is not loaded (not needed
+// for BuildEpochNode when BlobResult CIDs are already known).
+func (g *Generator) reconstructFromDB(epoch uint64, records []db.BlobRecord) (types.EpochInput, []types.BlobResult, error) {
+	firstSlot := epoch * 32
+	epochInp := types.EpochInput{
+		Epoch: epoch,
+		Slot:  firstSlot,
+	}
+	blobResults := make([]types.BlobResult, len(records))
+
+	for i, r := range records {
+		epochInp.Blobs = append(epochInp.Blobs, types.BlobInput{
+			Commitment:    r.Commitment,
+			VersionedHash: r.VersionedHash,
+			TxHash:        r.TxHash,
+			BlockNumber:   r.BlockNumber,
+			BlockHash:     r.BlockHash,
+			Slot:          r.Slot,
+			Epoch:         epoch,
+			Index:         r.BlobIndex,
+		})
+
+		dataCID, err := cid.Decode(r.DataCID)
+		if err != nil {
+			return types.EpochInput{}, nil, fmt.Errorf("decode data cid %q: %w", r.DataCID, err)
+		}
+		metaCID, err := cid.Decode(r.MetaCID)
+		if err != nil {
+			return types.EpochInput{}, nil, fmt.Errorf("decode meta cid %q: %w", r.MetaCID, err)
+		}
+		blobResults[i] = types.BlobResult{
+			Commitment: r.Commitment,
+			DataCID:    dataCID,
+			MetaCID:    metaCID,
+			SizeBytes:  r.SizeBytes,
+		}
+	}
+
+	return epochInp, blobResults, nil
 }
 
 // ─── Push API entry point ─────────────────────────────────────────────────────
@@ -319,26 +405,11 @@ func (g *Generator) finalizeEpochInner(ctx context.Context, epoch uint64) (cid.C
 		return cid.Cid{}, fmt.Errorf("no blobs found for epoch %d", epoch)
 	}
 
-	// Reconstruct BlobResult slice from DB records.
-	blobResults := make([]types.BlobResult, len(blobs))
-	for i, b := range blobs {
-		dataCID, err := cid.Decode(b.DataCID)
-		if err != nil {
-			return cid.Cid{}, fmt.Errorf("decode data cid %q: %w", b.DataCID, err)
-		}
-		metaCID, err := cid.Decode(b.MetaCID)
-		if err != nil {
-			return cid.Cid{}, fmt.Errorf("decode meta cid %q: %w", b.MetaCID, err)
-		}
-		blobResults[i] = types.BlobResult{
-			Commitment: b.Commitment,
-			DataCID:    dataCID,
-			MetaCID:    metaCID,
-			SizeBytes:  131072,
-		}
+	epochInp, blobResults, err := g.reconstructFromDB(epoch, blobs)
+	if err != nil {
+		return cid.Cid{}, fmt.Errorf("reconstruct epoch %d from DB: %w", epoch, err)
 	}
 
-	epochInp := types.EpochInput{Epoch: epoch}
 	epochBS := store.NewMemBlockstore()
 	lsys := store.NewLinkSystem(epochBS)
 
@@ -373,9 +444,21 @@ func (g *Generator) finalizeEpochInner(ctx context.Context, epoch uint64) (cid.C
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, epochCID cid.Cid, epoch uint64) error {
-	if err := g.ipfs.PutBlockstore(ctx, bs); err != nil {
+	total := bs.Len()
+	g.log.Info("uploading blocks to IPFS", "epoch", epoch, "blocks", total)
+	var skipped int
+	progress := func(current, count int, blockCID string, exists bool) {
+		if exists {
+			skipped++
+		}
+		if current == count || current%10 == 0 {
+			g.log.Info("IPFS upload progress", "epoch", epoch, "blocks", fmt.Sprintf("%d/%d", current, count), "skipped", skipped, "cid", blockCID)
+		}
+	}
+	if err := g.ipfs.PutBlockstore(ctx, bs, progress); err != nil {
 		return fmt.Errorf("upload epoch %d to IPFS: %w", epoch, err)
 	}
+	g.log.Info("IPFS upload complete", "epoch", epoch, "total", total, "uploaded", total-skipped, "skipped", skipped)
 	if g.cfg.IPFS.PinOnAdd {
 		if err := g.ipfs.Pin(ctx, epochCID); err != nil {
 			g.log.Warn("pin epoch failed (non-fatal)", "epoch", epoch, "cid", epochCID, "err", err)
@@ -477,6 +560,14 @@ func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochI
 			return nil, nil, r.err
 		}
 		blobResults[r.idx] = r.res
+		g.log.Info("blob processed",
+			"epoch", epochInp.Epoch,
+			"slot", epochInp.Blobs[r.idx].Slot,
+			"index", epochInp.Blobs[r.idx].Index,
+			"commitment", epochInp.Blobs[r.idx].Commitment[:16]+"…",
+			"data_cid", r.res.DataCID,
+			"meta_cid", r.res.MetaCID,
+		)
 	}
 
 	return epochBS, blobResults, nil

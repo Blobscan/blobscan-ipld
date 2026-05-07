@@ -241,15 +241,22 @@ func (c *Client) GetAllEpochs(ctx context.Context, network string) ([]EpochRecor
 
 // GetBlobsByEpoch returns all blob records for a given epoch, ordered by blob_index.
 type BlobRecord struct {
-	Commitment string
-	DataCID    string
-	MetaCID    string
-	BlobIndex  int
+	Commitment    string
+	DataCID       string
+	MetaCID       string
+	BlobIndex     int
+	Slot          uint64
+	VersionedHash string
+	TxHash        string
+	BlockNumber   uint64
+	BlockHash     string
+	SizeBytes     int64
 }
 
 func (c *Client) GetBlobsByEpoch(ctx context.Context, epoch uint64) ([]BlobRecord, error) {
 	rows, err := c.pool.Query(ctx,
-		`SELECT commitment, data_cid, meta_cid, blob_index
+		`SELECT commitment, data_cid, meta_cid, blob_index,
+		        slot, versioned_hash, tx_hash, block_number, block_hash, size_bytes
 		 FROM ipld_blobs WHERE epoch = $1 ORDER BY blob_index`,
 		epoch,
 	)
@@ -261,7 +268,8 @@ func (c *Client) GetBlobsByEpoch(ctx context.Context, epoch uint64) ([]BlobRecor
 	var out []BlobRecord
 	for rows.Next() {
 		var r BlobRecord
-		if err := rows.Scan(&r.Commitment, &r.DataCID, &r.MetaCID, &r.BlobIndex); err != nil {
+		if err := rows.Scan(&r.Commitment, &r.DataCID, &r.MetaCID, &r.BlobIndex,
+			&r.Slot, &r.VersionedHash, &r.TxHash, &r.BlockNumber, &r.BlockHash, &r.SizeBytes); err != nil {
 			return nil, fmt.Errorf("db: scan blob row: %w", err)
 		}
 		out = append(out, r)

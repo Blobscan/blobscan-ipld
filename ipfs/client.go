@@ -55,6 +55,22 @@ func normalizeAddr(addr string) string {
 
 // ─── Block API ────────────────────────────────────────────────────────────────
 
+// HasBlock checks whether a block with the given CID exists on the IPFS node.
+func (c *Client) HasBlock(ctx context.Context, id cid.Cid) (bool, error) {
+	endpoint := fmt.Sprintf("%s/api/v0/block/stat?arg=%s", c.base, id.String())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return false, fmt.Errorf("ipfs: build block/stat request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("ipfs: block/stat request: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	return resp.StatusCode == http.StatusOK, nil
+}
+
 // PutBlock uploads a single raw block to the IPFS node using /api/v0/block/put.
 // The CID codec and multihash are inferred from the block's CID prefix.
 func (c *Client) PutBlock(ctx context.Context, blk blocks.Block) error {
@@ -97,12 +113,31 @@ func (c *Client) PutBlock(ctx context.Context, blk blocks.Block) error {
 	return nil
 }
 
+// ProgressFunc is called during batch uploads with the current index, total
+// count, the CID of the block, and whether it was skipped (already existed).
+type ProgressFunc func(current, total int, blockCID string, skipped bool)
+
 // PutBlockstore uploads all blocks from a MemBlockstore to the IPFS node.
-func (c *Client) PutBlockstore(ctx context.Context, bs *store.MemBlockstore) error {
+// Blocks that already exist on the node are skipped.
+// An optional ProgressFunc is called after each block is processed.
+func (c *Client) PutBlockstore(ctx context.Context, bs *store.MemBlockstore, progress ...ProgressFunc) error {
 	blks := bs.All()
+	var fn ProgressFunc
+	if len(progress) > 0 {
+		fn = progress[0]
+	}
 	for i, blk := range blks {
-		if err := c.PutBlock(ctx, blk); err != nil {
-			return fmt.Errorf("ipfs: put block %d/%d (%s): %w", i+1, len(blks), blk.Cid(), err)
+		exists, err := c.HasBlock(ctx, blk.Cid())
+		if err != nil {
+			return fmt.Errorf("ipfs: check block %d/%d (%s): %w", i+1, len(blks), blk.Cid(), err)
+		}
+		if !exists {
+			if err := c.PutBlock(ctx, blk); err != nil {
+				return fmt.Errorf("ipfs: put block %d/%d (%s): %w", i+1, len(blks), blk.Cid(), err)
+			}
+		}
+		if fn != nil {
+			fn(i+1, len(blks), blk.Cid().String(), exists)
 		}
 	}
 	return nil
