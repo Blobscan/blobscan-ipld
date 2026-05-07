@@ -6,7 +6,7 @@
 |-------------|-------|
 | Go 1.21+ | `go version` to check |
 | IPFS node (Kubo) | Running locally or remotely; API must be reachable |
-| Ethereum Beacon Node | REST API enabled (Lighthouse, Prysm, Teku, Nimbus, Lodestar) |
+| Ethereum Beacon Node | REST API enabled (Lighthouse, Prysm, Teku, Nimbus, Lodestar). **Requires `--custody-group-count=64`+** post-PeerDAS — see [Beacon node requirements (PeerDAS)](#beacon-node-requirements-peerdas) below |
 | Ethereum Execution Node | JSON-RPC API — optional; needed to populate `txHash` and `blockNumber` in `BlobMetadata` (not yet wired) |
 | Disk space | ~3.5 GiB per 1000 epochs of mainnet blob data (128 KiB × avg blobs/epoch) |
 
@@ -14,6 +14,41 @@
 > interface to enrich each blob with `txHash`, `blockNumber`, and the EL `blockHash`. The generator
 > currently passes `nil`, so **those fields are always empty** in the generated DAG. To enable EL
 > enrichment, implement the `beacon.ELClient` interface and wire it into `generator.processEpoch`.
+
+---
+
+## Beacon node requirements (PeerDAS)
+
+Since the Ethereum **PeerDAS upgrade (EIP-7594)**, regular beacon nodes no
+longer custody all blob data — they only hold a subset of *data columns*.
+The `/eth/v1/beacon/blob_sidecars/{slot}` endpoint requires the node to
+custody **at least 64** data columns in order to reconstruct and serve full blob sidecars.
+
+blobscan-ipld uses this endpoint, so **the beacon node must custody at least
+64 data columns** (i.e. `--custody-group-count=64` or higher). Without this,
+the beacon node returns HTTP 503 and blobscan-ipld will abort with:
+
+```
+beacon node does not custody enough data columns to serve blob sidecars (PeerDAS);
+reconfigure it with --custody-group-count=64 or higher (or equivalent for your client)
+```
+
+Setting 128 makes the node a full supernode (all groups); 64 is the minimum
+required to serve the blob sidecars endpoint.
+
+### Client-specific flags
+
+| Client | Flag (minimum) | Flag (full supernode) |
+|-----------|----------------|----------------------|
+| Lighthouse | `--custody-group-count 64` | `--custody-group-count 128` |
+| Prysm | `--custody-group-count=64` | `--custody-group-count=128` |
+| Teku | `--p2p-custody-group-count=64` | `--p2p-custody-group-count=128` |
+| Lodestar | `--chain.custodyGroupCount 64` | `--chain.custodyGroupCount 128` |
+| Nimbus | `--custody-group-count=64` | `--custody-group-count=128` |
+
+> **Resource impact:** higher custody group counts increase bandwidth and
+> disk usage. 64 is the minimum for blobscan-ipld; 128 (full supernode)
+> makes the node custody all data columns on the network.
 
 ---
 
@@ -91,7 +126,7 @@ After initialisation, replace the datastore config. Edit
 > always re-fetch data from the beacon node this is an acceptable trade-off.
 > Set to `true` if you need strict durability.
 
-### 3. Configure the API and Gateway
+### 3. Configure the API and Gateway (optional)
 
 Edit `~/.ipfs/config` to bind the API and gateway to the addresses expected
 by the generator:
@@ -249,7 +284,7 @@ go build ./cmd/blobscan-ipld
 ### Continuous mode (normal operation)
 
 ```bash
-./blobscan-ipld run -config mainnet.yaml
+./blobscan-ipld -config mainnet.yaml run
 ```
 
 The generator:
@@ -274,7 +309,7 @@ Description=Blobscan IPLD DAG Generator
 After=network.target ipfs.service
 
 [Service]
-ExecStart=/usr/local/bin/blobscan-ipld run -config /etc/blobscan-ipld/mainnet.yaml
+ExecStart=/usr/local/bin/blobscan-ipld -config /etc/blobscan-ipld/mainnet.yaml run
 Restart=on-failure
 RestartSec=10s
 User=blobscan
@@ -296,7 +331,7 @@ Use the `epoch` subcommand to process a single epoch and exit. This is useful fo
 
 ```bash
 # Process epoch 300000 only
-./blobscan-ipld epoch -config mainnet.yaml -n 300000
+./blobscan-ipld -config mainnet.yaml -n 300000 epoch
 ```
 
 To backfill a range of epochs, set `start_epoch` in the config and run in

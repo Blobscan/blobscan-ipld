@@ -17,10 +17,10 @@ go build ./cmd/blobscan-ipld
 cp config.yaml mainnet.yaml   # set beacon_rpc, ipfs.api_addr, storage.data_dir
 
 # 3. Run (beacon-pull mode)
-./blobscan-ipld run -config mainnet.yaml
+./blobscan-ipld -config mainnet.yaml run
 
 # Or start the HTTP push API instead
-./blobscan-ipld serve -config mainnet.yaml
+./blobscan-ipld -config mainnet.yaml serve
 ```
 
 ## How it works

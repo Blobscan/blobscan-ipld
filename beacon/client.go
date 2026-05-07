@@ -5,6 +5,7 @@ package beacon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,15 @@ import (
 	"time"
 
 	"github.com/blobscan/blobscan-ipld/types"
+)
+
+// ErrInsufficientCustody is returned when the beacon node does not custody
+// enough data columns to serve blob sidecars (PeerDAS / EIP-7594). The node
+// must be reconfigured with --custody-group-count=64 or higher (or equivalent)
+// before blobscan-ipld can fetch blobs from it.
+var ErrInsufficientCustody = errors.New(
+	"beacon node does not custody enough data columns to serve blob sidecars (PeerDAS); " +
+		"reconfigure it with --custody-group-count=64 or higher (or equivalent for your client)",
 )
 
 // Client is a minimal Beacon Node REST API client (Ethereum Beacon API v1).
@@ -124,9 +134,9 @@ type BlobSidecar struct {
 	Slot            string `json:"slot"`
 	BlockParentRoot string `json:"block_parent_root"`
 	ProposerIndex   string `json:"proposer_index"`
-	Blob            string `json:"blob"`            // 0x-prefixed hex, 131072 bytes
-	KZGCommitment   string `json:"kzg_commitment"`  // 0x-prefixed hex, 48 bytes
-	KZGProof        string `json:"kzg_proof"`       // 0x-prefixed hex, 48 bytes
+	Blob            string `json:"blob"`           // 0x-prefixed hex, 131072 bytes
+	KZGCommitment   string `json:"kzg_commitment"` // 0x-prefixed hex, 48 bytes
+	KZGProof        string `json:"kzg_proof"`      // 0x-prefixed hex, 48 bytes
 }
 
 // GetBlobSidecars returns all blob sidecars for the block at the given slot.
@@ -181,13 +191,12 @@ func (c *Client) FetchEpochInput(ctx context.Context, epoch uint64, el ELClient)
 			}
 
 			idx, _ := strconv.Atoi(sc.Index)
-			slotNum, _ := strconv.ParseUint(sc.Slot, 10, 64)
 
 			bi := types.BlobInput{
 				Commitment:    sc.KZGCommitment,
 				VersionedHash: kzgCommitmentToVersionedHash(sc.KZGCommitment),
 				BlockHash:     sc.BlockRoot,
-				Slot:          slotNum,
+				Slot:          slot,
 				Epoch:         epoch,
 				Index:         idx,
 				Data:          blobData,
@@ -244,6 +253,10 @@ func (c *Client) get(ctx context.Context, url string, out interface{}) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusServiceUnavailable &&
+			strings.Contains(string(body), "not sufficient to serve blob sidecars") {
+			return ErrInsufficientCustody
+		}
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)
 	}
 

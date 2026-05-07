@@ -100,7 +100,7 @@ Each epoch can be exported to a self-contained CAR v2 file using the
 `export-car` CLI subcommand:
 
 ```bash
-blobscan-ipld export-car -config mainnet.yaml -n 269568
+blobscan-ipld -config mainnet.yaml -n 269568 export-car
 # writes to <storage.car_dir>/mainnet/269568.car
 ```
 

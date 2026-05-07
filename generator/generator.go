@@ -7,6 +7,7 @@ package generator
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -108,6 +109,10 @@ func (g *Generator) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	if err := g.processNewEpochs(ctx); err != nil {
+		if errors.Is(err, beacon.ErrInsufficientCustody) {
+			g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
+			return err
+		}
 		g.log.Error("initial epoch processing failed", "err", err)
 	}
 
@@ -118,6 +123,10 @@ func (g *Generator) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if err := g.processNewEpochs(ctx); err != nil {
+				if errors.Is(err, beacon.ErrInsufficientCustody) {
+					g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
+					return err
+				}
 				g.log.Error("epoch processing failed", "err", err)
 			}
 		}

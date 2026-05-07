@@ -44,12 +44,12 @@ Global flags (before subcommand):
   -log-level <level>  Log level: debug, info, warn, error (default: info)
 
 Examples:
-  blobscan-ipld run -config mainnet.yaml
-  blobscan-ipld serve -config mainnet.yaml
-  blobscan-ipld epoch -config mainnet.yaml -n 300000
-  blobscan-ipld finalize-epoch -config mainnet.yaml -n 300000
-  blobscan-ipld export-car       -config mainnet.yaml -n 300000 -out /tmp/300000.car
-  blobscan-ipld export-car-range -config mainnet.yaml -from 300000 -to 300099 -out /tmp/range.car
+  blobscan-ipld -config mainnet.yaml run
+  blobscan-ipld -config mainnet.yaml serve
+  blobscan-ipld -config mainnet.yaml -n 300000 epoch
+  blobscan-ipld -config mainnet.yaml -n 300000 finalize-epoch
+  blobscan-ipld -config mainnet.yaml -n 300000 -out /tmp/300000.car export-car
+  blobscan-ipld -config mainnet.yaml -from 300000 -to 300099 -out /tmp/range.car export-car-range
 `
 
 func main() {
