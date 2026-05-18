@@ -30,12 +30,20 @@ import (
 
 // Generator is the top-level DAG generation orchestrator.
 type Generator struct {
-	cfg    *config.Config
-	beacon *beacon.Client // nil when beacon_rpc is not configured
-	ipfs   *ipfs.Client
-	db     *db.Client
-	state  state.Backend
-	log    *slog.Logger
+	cfg         *config.Config
+	beacon      *beacon.Client // nil when beacon_rpc is not configured
+	ipfs        *ipfs.Client
+	db          *db.Client
+	state       state.Backend
+	log         *slog.Logger
+	genesisTime time.Time // zero if not yet fetched or beacon unavailable
+}
+
+// epochProgress carries batch-level progress state for ETA calculation.
+type epochProgress struct {
+	idx        int       // 0-based index of this epoch in the current batch
+	total      int       // total epochs in this batch
+	batchStart time.Time // when the batch started
 }
 
 // New creates a new Generator from the given configuration.
@@ -83,14 +91,25 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 		log.Info("using file state backend", "path", cfg.Storage.DataDir)
 	}
 
-	return &Generator{
+	g := &Generator{
 		cfg:    cfg,
 		beacon: beaconClient,
 		ipfs:   ipfsClient,
 		db:     dbClient,
 		state:  stateBackend,
 		log:    log,
-	}, nil
+	}
+
+	if beaconClient != nil {
+		if gt, err := beaconClient.GetGenesisTime(ctx); err != nil {
+			log.Warn("could not fetch genesis time; block timestamps will be omitted", "err", err)
+		} else {
+			g.genesisTime = gt
+			log.Info("beacon genesis time", "genesis_time", gt.Format(time.RFC3339))
+		}
+	}
+
+	return g, nil
 }
 
 // Close releases resources held by the generator (DB pool, etc.).
@@ -163,10 +182,17 @@ func (g *Generator) processNewEpochs(ctx context.Context) error {
 		return nil
 	}
 
-	g.log.Info("new finalized epochs detected", "from", startEpoch, "to", finalizedEpoch)
+	total := int(finalizedEpoch-startEpoch) + 1
+	g.log.Info("new finalized epochs detected", "from", startEpoch, "to", finalizedEpoch, "total", total)
 
+	batchStart := time.Now()
 	for epoch := startEpoch; epoch <= finalizedEpoch; epoch++ {
-		if err := g.processEpoch(ctx, epoch); err != nil {
+		p := &epochProgress{
+			idx:        int(epoch - startEpoch),
+			total:      total,
+			batchStart: batchStart,
+		}
+		if err := g.processEpoch(ctx, epoch, p); err != nil {
 			return fmt.Errorf("generator: process epoch %d: %w", epoch, err)
 		}
 	}
@@ -178,7 +204,8 @@ func (g *Generator) processNewEpochs(ctx context.Context) error {
 // fetch → build blobs → build epoch node → upload IPFS → rebuild NetworkRoot → save DB.
 // If blobs for this epoch already exist in the DB (e.g. from a previous interrupted run),
 // the beacon fetch and blob processing are skipped entirely.
-func (g *Generator) processEpoch(ctx context.Context, epoch uint64) error {
+// p is optional batch progress context; pass nil for one-shot calls.
+func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProgress) error {
 	g.log.Info("processing epoch", "epoch", epoch)
 
 	var (
@@ -207,7 +234,7 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64) error {
 	}
 
 	if !fromCache {
-		g.log.Info("fetching blobs from beacon", "epoch", epoch)
+		g.logFetchingEpoch(epoch, p)
 		var err error
 		epochInp, err = g.beacon.FetchEpochInput(ctx, epoch, nil)
 		if err != nil {
@@ -593,7 +620,35 @@ func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochI
 
 // ProcessSingleEpoch is a one-shot helper for backfilling or manual invocation.
 func (g *Generator) ProcessSingleEpoch(ctx context.Context, epoch uint64) error {
-	return g.processEpoch(ctx, epoch)
+	return g.processEpoch(ctx, epoch, nil)
+}
+
+// logFetchingEpoch logs the "fetching blobs from beacon" line enriched with
+// block timestamp, indexing speed, and estimated time to finish the batch.
+func (g *Generator) logFetchingEpoch(epoch uint64, p *epochProgress) {
+	args := []any{"epoch", epoch}
+
+	if !g.genesisTime.IsZero() {
+		firstSlot := epoch * 32
+		blockTime := beacon.SlotTime(g.genesisTime, firstSlot)
+		args = append(args, "block_time", blockTime.Format(time.RFC3339))
+	}
+
+	if p != nil && p.idx > 0 {
+		elapsed := time.Since(p.batchStart)
+		speed := float64(p.idx) / elapsed.Seconds() // epochs/s
+		remaining := p.total - p.idx
+		eta := time.Duration(float64(remaining)/speed) * time.Second
+		args = append(args,
+			"progress", fmt.Sprintf("%d/%d", p.idx+1, p.total),
+			"speed", fmt.Sprintf("%.2f epochs/s", speed),
+			"eta", eta.Round(time.Second).String(),
+		)
+	} else if p != nil {
+		args = append(args, "progress", fmt.Sprintf("%d/%d", p.idx+1, p.total))
+	}
+
+	g.log.Info("fetching blobs from beacon", args...)
 }
 
 // hexDecode accepts 0x-prefixed or plain hex strings.

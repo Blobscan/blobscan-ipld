@@ -151,6 +151,32 @@ func (c *Client) GetBlobSidecars(ctx context.Context, blockID string) ([]BlobSid
 	return resp.Data, nil
 }
 
+// ─── Genesis ──────────────────────────────────────────────────────────────────
+
+// GetGenesisTime returns the Unix timestamp of the beacon chain genesis.
+func (c *Client) GetGenesisTime(ctx context.Context) (time.Time, error) {
+	url := fmt.Sprintf("%s/eth/v1/beacon/genesis", c.base)
+	var resp struct {
+		Data struct {
+			GenesisTime string `json:"genesis_time"`
+		} `json:"data"`
+	}
+	if err := c.get(ctx, url, &resp); err != nil {
+		return time.Time{}, fmt.Errorf("beacon: genesis: %w", err)
+	}
+	secs, err := strconv.ParseInt(resp.Data.GenesisTime, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("beacon: parse genesis_time: %w", err)
+	}
+	return time.Unix(secs, 0).UTC(), nil
+}
+
+// SlotTime returns the timestamp of the given slot based on the genesis time.
+// Each slot is 12 seconds.
+func SlotTime(genesisTime time.Time, slot uint64) time.Time {
+	return genesisTime.Add(time.Duration(slot) * 12 * time.Second)
+}
+
 // ─── Epoch helpers ────────────────────────────────────────────────────────────
 
 const slotsPerEpoch = 32
