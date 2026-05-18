@@ -4,7 +4,7 @@
 
 | Requirement | Notes |
 |-------------|-------|
-| Go 1.21+ | `go version` to check |
+| Go 1.26+ | `go version` to check |
 | IPFS node (Kubo) | Running locally or remotely; API must be reachable |
 | Ethereum Beacon Node | REST API enabled (Lighthouse, Prysm, Teku, Nimbus, Lodestar). **Requires `--custody-group-count=64`+** post-PeerDAS — see [Beacon node requirements (PeerDAS)](#beacon-node-requirements-peerdas) below |
 | Ethereum Execution Node | JSON-RPC API — optional; needed to populate `txHash` and `blockNumber` in `BlobMetadata` (not yet wired) |
