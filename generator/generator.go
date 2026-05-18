@@ -77,8 +77,6 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 
 	var stateBackend state.Backend
 	if dbClient != nil {
-		// DB is available: use it as the state backend. MAX(epoch) on ipld_epochs
-		// is the resume point — no separate state file needed.
 		stateBackend = db.NewDBStateBackend(dbClient, cfg.Network.Name)
 		log.Info("using DB state backend")
 	} else {
@@ -119,14 +117,76 @@ func (g *Generator) Close() {
 	}
 }
 
-// Run starts the main beacon-pull processing loop. It blocks until ctx is cancelled.
+// Run starts the epoch processing pipeline. It blocks until ctx is cancelled.
 // Requires beacon_rpc to be configured.
+//
+// When there is a historical gap between start_epoch and the current finalized
+// tip, two goroutines run concurrently:
+//   - live: polls for newly finalized epochs and processes them going forward.
+//   - backfill: crawls historical epochs from start_epoch up to the live anchor.
+//
+// If no DB is available, backfill is skipped (we cannot track two cursors
+// independently without a persistent store) and the old sequential loop is used.
 func (g *Generator) Run(ctx context.Context) error {
 	if g.beacon == nil {
 		return fmt.Errorf("generator: beacon_rpc is required for the pull loop; use the push API instead")
 	}
 
-	g.log.Info("generator starting",
+	// Without a DB we cannot distinguish the two cursors efficiently: fall back
+	// to the simple sequential loop.
+	if g.db == nil {
+		return g.runSequential(ctx)
+	}
+
+	checkpoints, err := g.beacon.GetFinalityCheckpoints(ctx, "head")
+	if err != nil {
+		return fmt.Errorf("generator: get initial finality checkpoints: %w", err)
+	}
+	currentFinalized := checkpoints.FinalizedEpoch
+
+	liveCursor, err := g.state.GetLastProcessedEpoch(ctx)
+	if err != nil {
+		return fmt.Errorf("generator: get live cursor: %w", err)
+	}
+	backfillCursor, err := g.state.GetBackfillCursor(ctx)
+	if err != nil {
+		return fmt.Errorf("generator: get backfill cursor: %w", err)
+	}
+
+	backfillStart := g.cfg.Generator.StartEpoch
+	if backfillCursor > 0 {
+		backfillStart = backfillCursor + 1
+	}
+
+	// First run (live cursor not yet set): anchor the live goroutine at the
+	// current tip so it only processes new epochs, and hand history to backfill.
+	if liveCursor == 0 && backfillStart < currentFinalized {
+		liveCursor = currentFinalized - 1
+		if err := g.state.SetLastProcessedEpoch(ctx, liveCursor); err != nil {
+			return fmt.Errorf("generator: init live cursor: %w", err)
+		}
+		g.log.Info("parallel mode: anchored live at current tip, backfill will cover history",
+			"backfill_from", backfillStart,
+			"live_from", currentFinalized,
+		)
+	}
+
+	// Launch backfill goroutine for all epochs before the live anchor.
+	if backfillStart < liveCursor {
+		go func() {
+			if err := g.runBackfill(ctx, backfillStart, liveCursor-1); err != nil && !errors.Is(err, context.Canceled) {
+				g.log.Error("backfill goroutine error", "err", err)
+			}
+		}()
+	}
+
+	return g.runLive(ctx)
+}
+
+// runSequential is the original single-goroutine loop, used when no DB is
+// available and two-cursor tracking is not possible.
+func (g *Generator) runSequential(ctx context.Context) error {
+	g.log.Info("generator starting (sequential mode)",
 		"network", g.cfg.Network.Name,
 		"poll_interval", g.cfg.Generator.PollInterval,
 	)
@@ -134,7 +194,7 @@ func (g *Generator) Run(ctx context.Context) error {
 	ticker := time.NewTicker(g.cfg.Generator.PollInterval)
 	defer ticker.Stop()
 
-	if err := g.processNewEpochs(ctx); err != nil {
+	if err := g.processLiveTick(ctx); err != nil {
 		if errors.Is(err, beacon.ErrInsufficientCustody) {
 			g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
 			return err
@@ -148,7 +208,7 @@ func (g *Generator) Run(ctx context.Context) error {
 			g.log.Info("generator shutting down")
 			return ctx.Err()
 		case <-ticker.C:
-			if err := g.processNewEpochs(ctx); err != nil {
+			if err := g.processLiveTick(ctx); err != nil {
 				if errors.Is(err, beacon.ErrInsufficientCustody) {
 					g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
 					return err
@@ -159,26 +219,63 @@ func (g *Generator) Run(ctx context.Context) error {
 	}
 }
 
-// processNewEpochs checks for newly finalized epochs and processes each one.
-func (g *Generator) processNewEpochs(ctx context.Context) error {
+// runLive polls for newly finalized epochs and processes them. It blocks until
+// ctx is cancelled.
+func (g *Generator) runLive(ctx context.Context) error {
+	g.log.Info("live processing starting",
+		"network", g.cfg.Network.Name,
+		"poll_interval", g.cfg.Generator.PollInterval,
+	)
+
+	ticker := time.NewTicker(g.cfg.Generator.PollInterval)
+	defer ticker.Stop()
+
+	if err := g.processLiveTick(ctx); err != nil {
+		if errors.Is(err, beacon.ErrInsufficientCustody) {
+			g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
+			return err
+		}
+		g.log.Error("initial live tick failed", "err", err)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			g.log.Info("generator shutting down")
+			return ctx.Err()
+		case <-ticker.C:
+			if err := g.processLiveTick(ctx); err != nil {
+				if errors.Is(err, beacon.ErrInsufficientCustody) {
+					g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
+					return err
+				}
+				g.log.Error("live tick failed", "err", err)
+			}
+		}
+	}
+}
+
+// processLiveTick fetches the current finalized epoch and processes any epochs
+// newer than the live cursor.
+func (g *Generator) processLiveTick(ctx context.Context) error {
 	checkpoints, err := g.beacon.GetFinalityCheckpoints(ctx, "head")
 	if err != nil {
 		return fmt.Errorf("generator: get finality checkpoints: %w", err)
 	}
 
-	lastProcessed, err := g.state.GetLastProcessedEpoch(ctx)
+	liveCursor, err := g.state.GetLastProcessedEpoch(ctx)
 	if err != nil {
-		return fmt.Errorf("generator: get last processed epoch: %w", err)
+		return fmt.Errorf("generator: get live cursor: %w", err)
 	}
 
 	startEpoch := g.cfg.Generator.StartEpoch
-	if g.cfg.Generator.SkipExistingEpochs && lastProcessed > 0 {
-		startEpoch = lastProcessed + 1
+	if liveCursor > 0 {
+		startEpoch = liveCursor + 1
 	}
 
 	finalizedEpoch := checkpoints.FinalizedEpoch
-	if finalizedEpoch <= lastProcessed {
-		g.log.Debug("no new finalized epochs", "finalized", finalizedEpoch, "last_processed", lastProcessed)
+	if finalizedEpoch < startEpoch {
+		g.log.Debug("no new finalized epochs", "finalized", finalizedEpoch, "live_cursor", liveCursor)
 		return nil
 	}
 
@@ -195,8 +292,63 @@ func (g *Generator) processNewEpochs(ctx context.Context) error {
 		if err := g.processEpoch(ctx, epoch, p); err != nil {
 			return fmt.Errorf("generator: process epoch %d: %w", epoch, err)
 		}
+		if err := g.state.SetLastProcessedEpoch(ctx, epoch); err != nil {
+			return fmt.Errorf("generator: set live cursor %d: %w", epoch, err)
+		}
+		g.log.Info("rebuilding network root", "epoch", epoch)
+		if err := g.rebuildNetworkRoot(ctx); err != nil {
+			g.log.Warn("network root rebuild failed (non-fatal)", "epoch", epoch, "err", err)
+		}
 	}
 
+	return nil
+}
+
+// runBackfill processes epochs from startEpoch to targetEpoch (inclusive),
+// skipping any epoch already saved in the DB. It updates the backfill cursor
+// after each epoch and rebuilds the NetworkRoot once at completion.
+func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uint64) error {
+	total := int(targetEpoch-startEpoch) + 1
+	g.log.Info("backfill starting", "from", startEpoch, "to", targetEpoch, "total", total)
+
+	batchStart := time.Now()
+	for epoch := startEpoch; epoch <= targetEpoch; epoch++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Skip epochs already fully saved (e.g. processed by a previous run or
+		// by the live goroutine).
+		if g.db != nil {
+			exists, err := g.db.EpochExists(ctx, epoch)
+			if err != nil {
+				return fmt.Errorf("backfill: check epoch %d: %w", epoch, err)
+			}
+			if exists {
+				if err := g.state.SetBackfillCursor(ctx, epoch); err != nil {
+					return fmt.Errorf("backfill: set cursor %d: %w", epoch, err)
+				}
+				continue
+			}
+		}
+
+		p := &epochProgress{
+			idx:        int(epoch - startEpoch),
+			total:      total,
+			batchStart: batchStart,
+		}
+		if err := g.processEpoch(ctx, epoch, p); err != nil {
+			return fmt.Errorf("backfill: process epoch %d: %w", epoch, err)
+		}
+		if err := g.state.SetBackfillCursor(ctx, epoch); err != nil {
+			return fmt.Errorf("backfill: set cursor %d: %w", epoch, err)
+		}
+	}
+
+	g.log.Info("backfill complete", "from", startEpoch, "to", targetEpoch)
+	if err := g.rebuildNetworkRoot(ctx); err != nil {
+		g.log.Warn("backfill: final network root rebuild failed (non-fatal)", "err", err)
+	}
 	return nil
 }
 
@@ -294,13 +446,8 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		}
 	}
 
-	g.log.Info("rebuilding network root", "epoch", epoch)
-	if err := g.rebuildNetworkRoot(ctx); err != nil {
-		g.log.Warn("network root rebuild failed (non-fatal)", "epoch", epoch, "err", err)
-	}
-
 	g.log.Info("epoch complete", "epoch", epoch)
-	return g.state.SetLastProcessedEpoch(ctx, epoch)
+	return nil
 }
 
 // reconstructFromDB rebuilds EpochInput and BlobResult slices from DB records,
@@ -620,7 +767,16 @@ func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochI
 
 // ProcessSingleEpoch is a one-shot helper for backfilling or manual invocation.
 func (g *Generator) ProcessSingleEpoch(ctx context.Context, epoch uint64) error {
-	return g.processEpoch(ctx, epoch, nil)
+	if err := g.processEpoch(ctx, epoch, nil); err != nil {
+		return err
+	}
+	if err := g.state.SetLastProcessedEpoch(ctx, epoch); err != nil {
+		return err
+	}
+	if err := g.rebuildNetworkRoot(ctx); err != nil {
+		g.log.Warn("network root rebuild failed (non-fatal)", "epoch", epoch, "err", err)
+	}
+	return nil
 }
 
 // logFetchingEpoch logs the "fetching blobs from beacon" line enriched with

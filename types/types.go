@@ -57,4 +57,5 @@ type NetworkRootResult struct {
 type State struct {
 	Network            string `json:"network"`
 	LastProcessedEpoch uint64 `json:"last_processed_epoch"`
+	BackfillCursor     uint64 `json:"backfill_cursor,omitempty"`
 }

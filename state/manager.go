@@ -17,11 +17,16 @@ import (
 // Backend is the minimal interface the generator needs for progress tracking.
 // It is implemented by Manager (file-backed) and by db.Client (DB-backed).
 type Backend interface {
-	// GetLastProcessedEpoch returns the last fully processed epoch number.
+	// GetLastProcessedEpoch returns the live goroutine's cursor (highest epoch it has processed).
 	// Returns 0 and no error when no epoch has been processed yet.
 	GetLastProcessedEpoch(ctx context.Context) (uint64, error)
-	// SetLastProcessedEpoch persists the given epoch as the last processed.
+	// SetLastProcessedEpoch persists the live cursor.
 	SetLastProcessedEpoch(ctx context.Context, epoch uint64) error
+	// GetBackfillCursor returns the highest epoch the backfill goroutine has processed.
+	// Returns 0 and no error when backfill has not yet started.
+	GetBackfillCursor(ctx context.Context) (uint64, error)
+	// SetBackfillCursor persists the backfill cursor.
+	SetBackfillCursor(ctx context.Context, epoch uint64) error
 }
 
 // Manager reads and writes generator state to a JSON file.
@@ -71,6 +76,21 @@ func (m *Manager) SetLastProcessedEpoch(_ context.Context, epoch uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.current.LastProcessedEpoch = epoch
+	return m.save()
+}
+
+// GetBackfillCursor implements Backend.
+func (m *Manager) GetBackfillCursor(_ context.Context) (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.current.BackfillCursor, nil
+}
+
+// SetBackfillCursor implements Backend. Updates the backfill cursor and persists atomically.
+func (m *Manager) SetBackfillCursor(_ context.Context, epoch uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.current.BackfillCursor = epoch
 	return m.save()
 }
 

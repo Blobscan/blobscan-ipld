@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS ipld_blobs (
 );
 
 CREATE INDEX IF NOT EXISTS ipld_blobs_epoch_idx ON ipld_blobs(epoch);
+
+CREATE TABLE IF NOT EXISTS ipld_state (
+    key   TEXT   PRIMARY KEY,
+    value BIGINT NOT NULL DEFAULT 0
+);
 `
 
 func (c *Client) migrate(ctx context.Context) error {
@@ -175,13 +180,16 @@ func NewDBStateBackend(c *Client, network string) *DBStateBackend {
 	return &DBStateBackend{client: c, network: network}
 }
 
-// GetLastProcessedEpoch returns MAX(epoch) from ipld_epochs for the network,
-// or 0 if no epochs have been saved yet.
+// GetLastProcessedEpoch returns the live cursor from ipld_state, falling back
+// to MAX(epoch) for deployments that pre-date the ipld_state table.
 func (b *DBStateBackend) GetLastProcessedEpoch(ctx context.Context) (uint64, error) {
 	var epoch uint64
-	err := b.client.pool.QueryRow(ctx,
-		`SELECT COALESCE(MAX(epoch), 0) FROM ipld_epochs WHERE network = $1`,
-		b.network,
+	err := b.client.pool.QueryRow(ctx, `
+		SELECT COALESCE(
+			(SELECT value FROM ipld_state WHERE key = $1),
+			(SELECT MAX(epoch) FROM ipld_epochs WHERE network = $2),
+			0
+		)`, "live_"+b.network, b.network,
 	).Scan(&epoch)
 	if err != nil {
 		return 0, fmt.Errorf("db: get last processed epoch: %w", err)
@@ -189,9 +197,42 @@ func (b *DBStateBackend) GetLastProcessedEpoch(ctx context.Context) (uint64, err
 	return epoch, nil
 }
 
-// SetLastProcessedEpoch is a no-op for the DB backend: the epoch row written
-// by SaveEpoch already acts as the persistent progress marker.
-func (b *DBStateBackend) SetLastProcessedEpoch(_ context.Context, _ uint64) error {
+// SetLastProcessedEpoch persists the live cursor to ipld_state.
+func (b *DBStateBackend) SetLastProcessedEpoch(ctx context.Context, epoch uint64) error {
+	_, err := b.client.pool.Exec(ctx, `
+		INSERT INTO ipld_state (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+		"live_"+b.network, epoch,
+	)
+	if err != nil {
+		return fmt.Errorf("db: set live cursor %d: %w", epoch, err)
+	}
+	return nil
+}
+
+// GetBackfillCursor returns the backfill goroutine's cursor from ipld_state.
+func (b *DBStateBackend) GetBackfillCursor(ctx context.Context) (uint64, error) {
+	var epoch uint64
+	err := b.client.pool.QueryRow(ctx,
+		`SELECT COALESCE((SELECT value FROM ipld_state WHERE key = $1), 0)`,
+		"backfill_"+b.network,
+	).Scan(&epoch)
+	if err != nil {
+		return 0, fmt.Errorf("db: get backfill cursor: %w", err)
+	}
+	return epoch, nil
+}
+
+// SetBackfillCursor persists the backfill cursor to ipld_state.
+func (b *DBStateBackend) SetBackfillCursor(ctx context.Context, epoch uint64) error {
+	_, err := b.client.pool.Exec(ctx, `
+		INSERT INTO ipld_state (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+		"backfill_"+b.network, epoch,
+	)
+	if err != nil {
+		return fmt.Errorf("db: set backfill cursor %d: %w", epoch, err)
+	}
 	return nil
 }
 
