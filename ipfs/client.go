@@ -23,20 +23,22 @@ import (
 
 // Client is a minimal Kubo HTTP RPC client.
 type Client struct {
-	base    string // e.g. "http://127.0.0.1:5001"
-	http    *http.Client
-	timeout time.Duration
+	base     string // e.g. "http://127.0.0.1:5001"
+	http     *http.Client
+	timeout  time.Duration
+	pinOnAdd bool
 }
 
 // NewClient creates a new IPFS HTTP RPC client.
 // apiAddr should be a multiaddr string like "/ip4/127.0.0.1/tcp/5001" or a
 // plain HTTP URL like "http://127.0.0.1:5001".
-func NewClient(apiAddr string, timeout time.Duration) (*Client, error) {
+func NewClient(apiAddr string, timeout time.Duration, pinOnAdd bool) (*Client, error) {
 	base := normalizeAddr(apiAddr)
 	return &Client{
-		base:    base,
-		http:    &http.Client{Timeout: timeout},
-		timeout: timeout,
+		base:     base,
+		http:     &http.Client{Timeout: timeout},
+		timeout:  timeout,
+		pinOnAdd: pinOnAdd,
 	}, nil
 }
 
@@ -91,7 +93,7 @@ func (c *Client) PutBlock(ctx context.Context, blk blocks.Block) error {
 	params.Set("cid-codec", codecName(prefix.Codec))
 	params.Set("mhtype", mhName(prefix.MhType))
 	params.Set("mhlen", fmt.Sprintf("%d", prefix.MhLength))
-	params.Set("pin", "false")
+	params.Set("pin", fmt.Sprintf("%t", c.pinOnAdd))
 
 	endpoint := fmt.Sprintf("%s/api/v0/block/put?%s", c.base, params.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)

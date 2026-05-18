@@ -448,7 +448,7 @@ func cmdExportCARRange(ctx context.Context, cfg *config.Config, log *slog.Logger
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func newIPFSClientFromConfig(cfg *config.Config) (*ipfs.Client, error) {
-	return ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout)
+	return ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, cfg.IPFS.PinOnAdd)
 }
 
 func newLogger(level string) *slog.Logger {
