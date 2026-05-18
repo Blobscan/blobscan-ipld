@@ -6,6 +6,7 @@ ipfs:
   api_addr: "/ip4/127.0.0.1/tcp/5001"
   pin_on_add: true
   timeout: 30s
+  skip_upload: false  # set to true (or IPFS_SKIP_UPLOAD=true) to compute CIDs without uploading; api_addr not required in that mode
 
 storage:
   data_dir: "/var/lib/blobscan-ipld/mainnet"

@@ -48,6 +48,7 @@ services:
       BEACON_RPC: "$SEPOLIA_BEACON_RPC"
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_sepolia?sslmode=disable"
       IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
+      IPFS_SKIP_UPLOAD: "true"
     command: ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
 
 volumes:
