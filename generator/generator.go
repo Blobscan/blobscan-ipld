@@ -44,6 +44,7 @@ type epochProgress struct {
 	idx        int       // 0-based index of this epoch in the current batch
 	total      int       // total epochs in this batch
 	batchStart time.Time // when the batch started
+	src        string    // "live" or "backfill" — used as a log field
 }
 
 // New creates a new Generator from the given configuration.
@@ -293,6 +294,7 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 			idx:        int(epoch - startEpoch),
 			total:      total,
 			batchStart: batchStart,
+			src:        "live",
 		}
 		if err := g.processEpoch(ctx, epoch, p); err != nil {
 			return fmt.Errorf("generator: process epoch %d: %w", epoch, err)
@@ -300,7 +302,7 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 		if err := g.state.SetLastProcessedEpoch(ctx, epoch); err != nil {
 			return fmt.Errorf("generator: set live cursor %d: %w", epoch, err)
 		}
-		g.log.Info("rebuilding network root", "epoch", epoch)
+		g.log.Debug("rebuilding network root", "epoch", epoch)
 		if err := g.rebuildNetworkRoot(ctx); err != nil {
 			g.log.Warn("network root rebuild failed (non-fatal)", "epoch", epoch, "err", err)
 		}
@@ -341,6 +343,7 @@ func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uin
 			idx:        int(epoch - startEpoch),
 			total:      total,
 			batchStart: batchStart,
+			src:        "backfill",
 		}
 		if err := g.processEpoch(ctx, epoch, p); err != nil {
 			return fmt.Errorf("backfill: process epoch %d: %w", epoch, err)
@@ -363,7 +366,7 @@ func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uin
 // the beacon fetch and blob processing are skipped entirely.
 // p is optional batch progress context; pass nil for one-shot calls.
 func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProgress) error {
-	g.log.Info("processing epoch", "epoch", epoch)
+	g.log.Debug("processing epoch", "epoch", epoch)
 
 	var (
 		epochInp    types.EpochInput
@@ -379,7 +382,7 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 			return fmt.Errorf("check cached blobs epoch %d: %w", epoch, err)
 		}
 		if len(cached) > 0 {
-			g.log.Info("using cached blobs from DB, skipping beacon fetch",
+			g.log.Debug("using cached blobs from DB, skipping beacon fetch",
 				"epoch", epoch, "blobs", len(cached))
 			epochInp, blobResults, err = g.reconstructFromDB(epoch, cached)
 			if err != nil {
@@ -400,17 +403,16 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 
 		if len(epochInp.Blobs) == 0 {
 			g.log.Info("epoch has no blobs, skipping", "epoch", epoch)
-			return g.state.SetLastProcessedEpoch(ctx, epoch)
+			return nil
 		}
 
-		g.log.Info("blobs fetched from beacon",
+		g.log.Debug("blobs fetched from beacon",
 			"epoch", epoch,
 			"blobs", len(epochInp.Blobs),
 			"first_slot", epochInp.Slot,
 			"last_slot", epochInp.Slot+31,
 		)
 
-		g.log.Info("processing blobs", "epoch", epoch, "blobs", len(epochInp.Blobs))
 		epochBS, blobResults, err = g.processEpochBlobs(ctx, epochInp)
 		if err != nil {
 			return fmt.Errorf("process blobs epoch %d: %w", epoch, err)
@@ -428,11 +430,15 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		return fmt.Errorf("build epoch node %d: %w", epoch, err)
 	}
 
+	src := ""
+	if p != nil {
+		src = p.src
+	}
 	g.log.Info("epoch node built",
+		"src", src,
 		"epoch", epoch,
 		"cid", epochResult.CID,
 		"blobs", len(blobResults),
-		"size_bytes", epochResult.ApproximateSizeBytes,
 	)
 
 	if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
@@ -440,7 +446,7 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 	}
 
 	if g.db != nil {
-		g.log.Info("saving to database", "epoch", epoch, "blobs", len(blobResults))
+		g.log.Debug("saving to database", "epoch", epoch, "blobs", len(blobResults))
 		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
 		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobResults), epochTime); err != nil {
 			return fmt.Errorf("save epoch %d to db: %w", epoch, err)
@@ -452,7 +458,7 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		}
 	}
 
-	g.log.Info("epoch complete", "epoch", epoch)
+	g.log.Debug("epoch complete", "epoch", epoch)
 	return nil
 }
 
@@ -643,16 +649,16 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 		return nil
 	}
 	total := bs.Len()
-	g.log.Info("uploading blocks to IPFS", "epoch", epoch, "blocks", total)
+	g.log.Debug("uploading blocks to IPFS", "epoch", epoch, "blocks", total)
 	progress := func(current, count int, blockCID string) {
 		if current == count || current%10 == 0 {
-			g.log.Info("IPFS upload progress", "epoch", epoch, "blocks", fmt.Sprintf("%d/%d", current, count), "cid", blockCID)
+			g.log.Debug("IPFS upload progress", "epoch", epoch, "blocks", fmt.Sprintf("%d/%d", current, count), "cid", blockCID)
 		}
 	}
 	if err := g.ipfs.PutBlockstore(ctx, bs, progress); err != nil {
 		return fmt.Errorf("upload epoch %d to IPFS: %w", epoch, err)
 	}
-	g.log.Info("IPFS upload complete", "epoch", epoch, "total", total)
+	g.log.Debug("IPFS upload complete", "epoch", epoch, "total", total)
 	if g.cfg.IPFS.PinOnAdd {
 		if err := g.ipfs.Pin(ctx, epochCID); err != nil {
 			g.log.Warn("pin epoch failed (non-fatal)", "epoch", epoch, "cid", epochCID, "err", err)
@@ -703,7 +709,7 @@ func (g *Generator) rebuildNetworkRoot(ctx context.Context) error {
 		return fmt.Errorf("upload network root to IPFS: %w", err)
 	}
 
-	g.log.Info("network root rebuilt", "cid", rootResult.CID, "epochs", len(epochResults))
+	g.log.Debug("network root rebuilt", "cid", rootResult.CID, "epochs", len(epochResults))
 	return nil
 }
 
@@ -789,6 +795,10 @@ func (g *Generator) ProcessSingleEpoch(ctx context.Context, epoch uint64) error 
 // block timestamp, indexing speed, and estimated time to finish the batch.
 func (g *Generator) logFetchingEpoch(epoch uint64, p *epochProgress) {
 	args := []any{"epoch", epoch}
+
+	if p != nil && p.src != "" {
+		args = append(args, "src", p.src)
+	}
 
 	if !g.genesisTime.IsZero() {
 		firstSlot := epoch * 32
