@@ -190,6 +190,7 @@ editing the YAML file. Environment variables take precedence over the file.
 | `NETWORK_NAME` | `network.name` |
 | `BEACON_RPC` | `network.beacon_rpc` |
 | `POSTGRES_DSN` | `storage.postgres_dsn` |
+| `IPFS_API_ADDR` | `ipfs.api_addr` |
 
 This is the mechanism used by the Docker Compose files — a single `config.yaml`
 is shared across networks and the per-deployment values are injected via the

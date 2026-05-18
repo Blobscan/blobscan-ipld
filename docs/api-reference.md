@@ -8,7 +8,7 @@ All exported symbols across every package. Internal helpers are omitted.
 
 ### `func Load(path string) (*Config, error)`
 Reads a YAML file at `path`, then (in order): applies environment variable
-overrides (`NETWORK_NAME`, `BEACON_RPC`, `POSTGRES_DSN`),
+overrides (`NETWORK_NAME`, `BEACON_RPC`, `POSTGRES_DSN`, `IPFS_API_ADDR`),
 validates required fields, and fills in defaults. Returns a `*Config`. Returns
 an error if the file cannot be read, the YAML is malformed, or any required
 field is missing after overrides.

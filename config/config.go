@@ -78,6 +78,9 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("POSTGRES_DSN"); v != "" {
 		c.Storage.PostgresDSN = v
 	}
+	if v := os.Getenv("IPFS_API_ADDR"); v != "" {
+		c.IPFS.APIAddr = v
+	}
 }
 
 func (c *Config) validate() error {

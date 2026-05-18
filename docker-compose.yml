@@ -47,6 +47,7 @@ services:
       NETWORK_NAME: mainnet
       BEACON_RPC: "${BEACON_RPC:?BEACON_RPC is required}"
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_mainnet?sslmode=disable"
+      IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
     command: ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
 
 volumes:
