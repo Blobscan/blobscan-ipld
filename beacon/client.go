@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/blobscan/blobscan-ipld/types"
 )
 
@@ -27,16 +29,22 @@ var ErrInsufficientCustody = errors.New(
 
 // Client is a minimal Beacon Node REST API client (Ethereum Beacon API v1).
 type Client struct {
-	base string
-	http *http.Client
+	base        string
+	http        *http.Client
+	slotWorkers int // parallel slot fetches inside FetchEpochInput
 }
 
 // NewClient creates a new Beacon Node client.
 // baseURL should be the REST API base, e.g. "http://localhost:5052".
-func NewClient(baseURL string, timeout time.Duration) *Client {
+// slotWorkers controls how many slots are fetched in parallel per epoch (default 8).
+func NewClient(baseURL string, timeout time.Duration, slotWorkers int) *Client {
+	if slotWorkers <= 0 {
+		slotWorkers = 8
+	}
 	return &Client{
-		base: strings.TrimRight(baseURL, "/"),
-		http: &http.Client{Timeout: timeout},
+		base:        strings.TrimRight(baseURL, "/"),
+		http:        &http.Client{Timeout: timeout},
+		slotWorkers: slotWorkers,
 	}
 }
 
@@ -208,59 +216,84 @@ func SlotToEpoch(slot uint64) uint64 { return slot / slotsPerEpoch }
 
 // FetchEpochInput fetches all blob sidecars for every slot in the given epoch
 // and assembles them into an EpochInput ready for the DAG builder.
+// Slots are fetched in parallel using c.slotWorkers goroutines. Results are
+// reassembled in slot order so the output is deterministic regardless of which
+// slot completes first.
 // txHash and blockNumber are fetched from the EL node via the provided
 // ELClient; pass nil to skip EL enrichment.
 func (c *Client) FetchEpochInput(ctx context.Context, epoch uint64, el ELClient) (types.EpochInput, error) {
 	firstSlot := EpochToFirstSlot(epoch)
-	lastSlot := firstSlot + slotsPerEpoch - 1
 
 	inp := types.EpochInput{
 		Epoch: epoch,
 		Slot:  firstSlot,
 	}
 
-	for slot := firstSlot; slot <= lastSlot; slot++ {
-		sidecars, err := c.GetBlobSidecars(ctx, strconv.FormatUint(slot, 10))
-		if err != nil {
-			// A 404 means the slot was missed; skip it.
-			if isNotFound(err) {
-				continue
-			}
-			return types.EpochInput{}, fmt.Errorf("beacon: fetch slot %d: %w", slot, err)
-		}
+	// Pre-allocate one entry per slot; each goroutine writes to its own index
+	// so no mutex is needed.
+	slotBlobs := make([][]types.BlobInput, slotsPerEpoch)
 
-		for _, sc := range sidecars {
-			blobData, err := hexToBytes(sc.Blob)
+	g, gctx := errgroup.WithContext(ctx)
+	sem := make(chan struct{}, c.slotWorkers)
+
+	for i := 0; i < slotsPerEpoch; i++ {
+		i := i
+		slot := firstSlot + uint64(i)
+		g.Go(func() error {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			sidecars, err := c.GetBlobSidecars(gctx, strconv.FormatUint(slot, 10))
 			if err != nil {
-				return types.EpochInput{}, fmt.Errorf("beacon: decode blob hex slot %d: %w", slot, err)
-			}
-
-			idx, _ := strconv.Atoi(sc.Index)
-
-			bi := types.BlobInput{
-				Commitment:    sc.KZGCommitment,
-				VersionedHash: kzgCommitmentToVersionedHash(sc.KZGCommitment),
-				BlockHash:     sc.BlockRoot,
-				Slot:          slot,
-				Epoch:         epoch,
-				Index:         idx,
-				Data:          blobData,
-			}
-
-			// Enrich with EL data if available.
-			if el != nil {
-				elData, err := el.GetBlobTxData(ctx, sc.BlockRoot, sc.KZGCommitment)
-				if err == nil {
-					bi.TxHash = elData.TxHash
-					bi.BlockNumber = elData.BlockNumber
-					bi.BlockHash = elData.BlockHash
+				if isNotFound(err) {
+					return nil // missed slot — skip
 				}
+				return fmt.Errorf("beacon: fetch slot %d: %w", slot, err)
 			}
 
-			inp.Blobs = append(inp.Blobs, bi)
-		}
+			blobs := make([]types.BlobInput, 0, len(sidecars))
+			for _, sc := range sidecars {
+				blobData, err := hexToBytes(sc.Blob)
+				if err != nil {
+					return fmt.Errorf("beacon: decode blob hex slot %d: %w", slot, err)
+				}
+
+				idx, _ := strconv.Atoi(sc.Index)
+
+				bi := types.BlobInput{
+					Commitment:    sc.KZGCommitment,
+					VersionedHash: kzgCommitmentToVersionedHash(sc.KZGCommitment),
+					BlockHash:     sc.BlockRoot,
+					Slot:          slot,
+					Epoch:         epoch,
+					Index:         idx,
+					Data:          blobData,
+				}
+
+				if el != nil {
+					elData, err := el.GetBlobTxData(gctx, sc.BlockRoot, sc.KZGCommitment)
+					if err == nil {
+						bi.TxHash = elData.TxHash
+						bi.BlockNumber = elData.BlockNumber
+						bi.BlockHash = elData.BlockHash
+					}
+				}
+
+				blobs = append(blobs, bi)
+			}
+			slotBlobs[i] = blobs
+			return nil
+		})
 	}
 
+	if err := g.Wait(); err != nil {
+		return types.EpochInput{}, err
+	}
+
+	// Reassemble in slot order.
+	for _, blobs := range slotBlobs {
+		inp.Blobs = append(inp.Blobs, blobs...)
+	}
 	return inp, nil
 }
 

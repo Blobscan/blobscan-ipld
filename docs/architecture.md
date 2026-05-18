@@ -149,6 +149,7 @@ The main orchestrator. Wires all packages together and runs the processing loop.
 ## Concurrency model
 
 - When DB persistence is configured, two goroutines run concurrently: the **live** goroutine polls for newly finalized epochs; the **backfill** goroutine processes historical epochs from `start_epoch` up to the live anchor. Each goroutine has its own cursor in `ipld_state`. Without a DB, a single sequential loop is used.
+- Within `FetchEpochInput`, all 32 slots are fetched in parallel using a bounded worker pool of `generator.beacon_workers` goroutines (default 8). Results are assembled in slot order after all workers complete.
 - Within each epoch, blobs are processed by a pool of `generator.workers` goroutines. All workers share a single `LinkSystem`; the underlying blockstore's `sync.RWMutex` serialises concurrent writes.
 - The push API (`serve` mode) runs on a separate HTTP server goroutine; each request is handled independently with no shared mutable state.
 - State writes are serialised by the `sync.RWMutex` inside `state.Manager` (file backend) or are inherently atomic as DB row writes (DB backend).

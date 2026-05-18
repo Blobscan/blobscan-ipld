@@ -69,6 +69,7 @@ Controls DAG generation behaviour.
 | `poll_interval` | duration | no | `12s` | How often to query the beacon node for new finalized epochs. One Ethereum slot is 12 s; one epoch is 6.4 min |
 | `start_epoch` | uint64 | no | network default | First epoch to process when starting from scratch. When `0` (not set), the Deneb fork epoch is applied automatically for known networks (see table below). Override explicitly to resume from a specific epoch. |
 | `workers` | int | no | `4` | Number of goroutines in the parallel blob-processing worker pool per epoch |
+| `beacon_workers` | int | no | `8` | Number of slots fetched in parallel per epoch. Each slot is one HTTP request to the beacon node; raising this above `8` is rarely beneficial unless beacon node RTT is very high |
 | `skip_existing_epochs` | bool | no | `false` | If `true` and a state file exists, start from `last_processed_epoch + 1` instead of `start_epoch` |
 
 ---

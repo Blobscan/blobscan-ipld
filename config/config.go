@@ -44,6 +44,7 @@ type GeneratorConfig struct {
 	PollInterval       time.Duration `yaml:"poll_interval"`        // how often to check for new finalized epochs
 	StartEpoch         uint64        `yaml:"start_epoch"`          // first epoch to process (0 = genesis)
 	Workers            int           `yaml:"workers"`              // parallel blob-processing goroutines
+	BeaconWorkers      int           `yaml:"beacon_workers"`       // parallel slot fetches per epoch
 	SkipExistingEpochs bool          `yaml:"skip_existing_epochs"` // resume from last processed epoch
 	APIListen          string        `yaml:"api_listen"`           // address for the HTTP push API (e.g. ":8080"); empty = disabled
 }
@@ -132,6 +133,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Generator.Workers == 0 {
 		c.Generator.Workers = 4
+	}
+	if c.Generator.BeaconWorkers == 0 {
+		c.Generator.BeaconWorkers = 8
 	}
 	if c.Storage.CARDir == "" {
 		c.Storage.CARDir = c.Storage.DataDir + "/car"
