@@ -100,6 +100,15 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 	}
 
 	if beaconClient != nil {
+		remoteNetwork, err := beaconClient.GetNetworkName(ctx)
+		if err != nil {
+			log.Warn("could not verify beacon network name", "err", err)
+		} else if remoteNetwork != cfg.Network.Name {
+			return nil, fmt.Errorf("generator: network mismatch: config says %q but beacon node reports %q", cfg.Network.Name, remoteNetwork)
+		} else {
+			log.Info("beacon network verified", "network", remoteNetwork)
+		}
+
 		if gt, err := beaconClient.GetGenesisTime(ctx); err != nil {
 			log.Warn("could not fetch genesis time; block timestamps will be omitted", "err", err)
 		} else {

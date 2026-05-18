@@ -171,6 +171,25 @@ func (c *Client) GetGenesisTime(ctx context.Context) (time.Time, error) {
 	return time.Unix(secs, 0).UTC(), nil
 }
 
+// GetNetworkName returns the CONFIG_NAME from the beacon node's consensus spec
+// (e.g. "mainnet", "sepolia", "gnosis"). Used to verify the configured network
+// name matches the actual beacon node before processing begins.
+func (c *Client) GetNetworkName(ctx context.Context) (string, error) {
+	url := fmt.Sprintf("%s/eth/v1/config/spec", c.base)
+	var resp struct {
+		Data struct {
+			ConfigName string `json:"CONFIG_NAME"`
+		} `json:"data"`
+	}
+	if err := c.get(ctx, url, &resp); err != nil {
+		return "", fmt.Errorf("beacon: config spec: %w", err)
+	}
+	if resp.Data.ConfigName == "" {
+		return "", fmt.Errorf("beacon: config spec: CONFIG_NAME is empty")
+	}
+	return strings.ToLower(resp.Data.ConfigName), nil
+}
+
 // SlotTime returns the timestamp of the given slot based on the genesis time.
 // Each slot is 12 seconds.
 func SlotTime(genesisTime time.Time, slot uint64) time.Time {
