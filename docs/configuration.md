@@ -26,9 +26,10 @@ Connection settings for the IPFS node (Kubo-compatible).
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `api_addr` | string | **yes** | — | IPFS HTTP RPC address. Accepts multiaddr (`/ip4/127.0.0.1/tcp/5001`) or plain URL (`http://127.0.0.1:5001`) |
-| `pin_on_add` | bool | no | `false` | If `true`, recursively pins each `RangeNode` CID after uploading its blocks |
+| `api_addr` | string | conditional | — | IPFS HTTP RPC address. Accepts multiaddr (`/ip4/127.0.0.1/tcp/5001`) or plain URL (`http://127.0.0.1:5001`). Required unless `skip_upload: true` |
+| `pin_on_add` | bool | no | `false` | If `true`, recursively pins each epoch CID after uploading its blocks |
 | `timeout` | duration | no | `30s` | HTTP request timeout for all IPFS API calls. Also used as the Beacon Node client timeout |
+| `skip_upload` | bool | no | `false` | If `true`, skip all IPFS interaction. CIDs are still computed deterministically and saved to the database. Useful for DB-only indexing without running an IPFS node. When set, `api_addr` is not required |
 
 ---
 
@@ -191,6 +192,7 @@ editing the YAML file. Environment variables take precedence over the file.
 | `BEACON_RPC` | `network.beacon_rpc` |
 | `POSTGRES_DSN` | `storage.postgres_dsn` |
 | `IPFS_API_ADDR` | `ipfs.api_addr` |
+| `IPFS_SKIP_UPLOAD` | `ipfs.skip_upload` (set to `true` or `1` to enable) |
 
 This is the mechanism used by the Docker Compose files — a single `config.yaml`
 is shared across networks and the per-deployment values are injected via the
@@ -204,7 +206,7 @@ The following fields are validated at startup; the process exits with a clear
 error if any are missing:
 
 - `network.name` — must be non-empty
-- `ipfs.api_addr` — must be non-empty
+- `ipfs.api_addr` — must be non-empty **unless** `ipfs.skip_upload: true`
 - `storage.data_dir` — must be non-empty
 
 Conditionally required:

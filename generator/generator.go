@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ipfs/go-cid"
+	"github.com/ipld/go-ipld-prime"
 
 	"github.com/blobscan/blobscan-ipld/api"
 	"github.com/blobscan/blobscan-ipld/beacon"
@@ -44,9 +45,15 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 		beaconClient = beacon.NewClient(cfg.Network.BeaconRPC, cfg.IPFS.Timeout)
 	}
 
-	ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout)
-	if err != nil {
-		return nil, fmt.Errorf("generator: create ipfs client: %w", err)
+	var ipfsClient *ipfs.Client
+	if !cfg.IPFS.SkipUpload {
+		var err error
+		ipfsClient, err = ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("generator: create ipfs client: %w", err)
+		}
+	} else {
+		log.Info("IPFS upload disabled (skip_upload=true); CIDs will be computed but not uploaded")
 	}
 
 	var dbClient *db.Client
@@ -338,17 +345,25 @@ func (g *Generator) ProcessBlobInput(ctx context.Context, req api.BlobPushReques
 		Data:          rawData,
 	}
 
-	blobBS := store.NewMemBlockstore()
-	lsys := store.NewLinkSystem(blobBS)
+	var blobBS *store.MemBlockstore
+	var lsys ipld.LinkSystem
+	if g.ipfs == nil {
+		lsys = store.NewLinkSystem(store.NullBlockstore{})
+	} else {
+		blobBS = store.NewMemBlockstore()
+		lsys = store.NewLinkSystem(blobBS)
+	}
 
 	res, err := builder.ProcessBlob(ctx, lsys, inp)
 	if err != nil {
 		return api.BlobPushResponse{}, fmt.Errorf("process blob: %w", err)
 	}
 
-	// Upload just this blob's blocks to IPFS.
-	if err := g.ipfs.PutBlockstore(ctx, blobBS); err != nil {
-		return api.BlobPushResponse{}, fmt.Errorf("upload blob to ipfs: %w", err)
+	// Upload just this blob's blocks to IPFS (skipped when ipfs is nil).
+	if blobBS != nil {
+		if err := g.ipfs.PutBlockstore(ctx, blobBS); err != nil {
+			return api.BlobPushResponse{}, fmt.Errorf("upload blob to ipfs: %w", err)
+		}
 	}
 
 	// Persist blob record to DB (epoch row may not exist yet; SaveBlobs handles that).
@@ -444,6 +459,9 @@ func (g *Generator) finalizeEpochInner(ctx context.Context, epoch uint64) (cid.C
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, epochCID cid.Cid, epoch uint64) error {
+	if g.ipfs == nil {
+		return nil
+	}
 	total := bs.Len()
 	g.log.Info("uploading blocks to IPFS", "epoch", epoch, "blocks", total)
 	var skipped int
@@ -473,6 +491,10 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 func (g *Generator) rebuildNetworkRoot(ctx context.Context) error {
 	if g.db == nil {
 		g.log.Debug("skipping NetworkRoot rebuild: DB persistence disabled")
+		return nil
+	}
+	if g.ipfs == nil {
+		g.log.Debug("skipping NetworkRoot rebuild: IPFS upload disabled")
 		return nil
 	}
 	records, err := g.db.GetAllEpochs(ctx, g.cfg.Network.Name)

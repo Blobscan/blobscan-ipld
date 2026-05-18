@@ -24,9 +24,10 @@ type NetworkConfig struct {
 
 // IPFSConfig holds connection settings for the IPFS node.
 type IPFSConfig struct {
-	APIAddr  string        `yaml:"api_addr"` // e.g. "/ip4/127.0.0.1/tcp/5001"
-	PinOnAdd bool          `yaml:"pin_on_add"`
-	Timeout  time.Duration `yaml:"timeout"`
+	APIAddr    string        `yaml:"api_addr"`    // e.g. "/ip4/127.0.0.1/tcp/5001"
+	PinOnAdd   bool          `yaml:"pin_on_add"`
+	Timeout    time.Duration `yaml:"timeout"`
+	SkipUpload bool          `yaml:"skip_upload"` // compute CIDs only; do not connect to or upload to IPFS
 }
 
 // StorageConfig controls local storage paths and the database connection.
@@ -81,14 +82,17 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("IPFS_API_ADDR"); v != "" {
 		c.IPFS.APIAddr = v
 	}
+	if v := os.Getenv("IPFS_SKIP_UPLOAD"); v == "true" || v == "1" {
+		c.IPFS.SkipUpload = true
+	}
 }
 
 func (c *Config) validate() error {
 	if c.Network.Name == "" {
 		return fmt.Errorf("network.name is required")
 	}
-	if c.IPFS.APIAddr == "" {
-		return fmt.Errorf("ipfs.api_addr is required")
+	if c.IPFS.APIAddr == "" && !c.IPFS.SkipUpload {
+		return fmt.Errorf("ipfs.api_addr is required (or set ipfs.skip_upload: true)")
 	}
 	if c.Storage.DataDir == "" {
 		return fmt.Errorf("storage.data_dir is required")

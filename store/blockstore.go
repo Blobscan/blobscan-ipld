@@ -128,4 +128,21 @@ func (m *MemBlockstore) All() []blocks.Block {
 	return out
 }
 
+// NullBlockstore discards all writes and returns ErrNotFound on reads.
+// Use it when only CID computation is needed and block retention is not
+// (e.g. when ipfs.skip_upload is true).
+type NullBlockstore struct{}
+
+func (NullBlockstore) Put(_ context.Context, _ blocks.Block) error             { return nil }
+func (NullBlockstore) PutMany(_ context.Context, _ []blocks.Block) error       { return nil }
+func (NullBlockstore) Get(_ context.Context, _ cid.Cid) (blocks.Block, error)  { return nil, ErrNotFound }
+func (NullBlockstore) Has(_ context.Context, _ cid.Cid) (bool, error)          { return false, nil }
+func (NullBlockstore) GetSize(_ context.Context, _ cid.Cid) (int, error)       { return 0, ErrNotFound }
+func (NullBlockstore) DeleteBlock(_ context.Context, _ cid.Cid) error          { return nil }
+func (NullBlockstore) HashOnRead(_ bool)                                        {}
+func (NullBlockstore) AllKeysChan(_ context.Context) (<-chan cid.Cid, error) {
+	ch := make(chan cid.Cid)
+	close(ch)
+	return ch, nil
+}
 

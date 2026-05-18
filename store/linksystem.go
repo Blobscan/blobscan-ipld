@@ -2,10 +2,12 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 
 	blocks "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-cid"
 	"github.com/ipld/go-ipld-prime"
 	"github.com/ipld/go-ipld-prime/codec"
 	"github.com/ipld/go-ipld-prime/codec/dagcbor"
@@ -14,9 +16,16 @@ import (
 	mc "github.com/multiformats/go-multicodec"
 )
 
-// NewLinkSystem returns an ipld.LinkSystem backed by the given MemBlockstore.
+// blockstoreBackend is the minimal interface required by NewLinkSystem.
+// Both *MemBlockstore and NullBlockstore satisfy it.
+type blockstoreBackend interface {
+	Put(context.Context, blocks.Block) error
+	Get(context.Context, cid.Cid) (blocks.Block, error)
+}
+
+// NewLinkSystem returns an ipld.LinkSystem backed by the given blockstore.
 // Structured nodes use dag-cbor; raw blob bytes use codec=raw.
-func NewLinkSystem(bs *MemBlockstore) ipld.LinkSystem {
+func NewLinkSystem(bs blockstoreBackend) ipld.LinkSystem {
 	lsys := cidlink.DefaultLinkSystem()
 
 	lsys.StorageWriteOpener = func(lctx ipld.LinkContext) (io.Writer, ipld.BlockWriteCommitter, error) {
