@@ -14,6 +14,14 @@ type Config struct {
 	IPFS      IPFSConfig      `yaml:"ipfs"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Generator GeneratorConfig `yaml:"generator"`
+	Blobscan  BlobscanConfig  `yaml:"blobscan"`
+}
+
+// BlobscanConfig holds connection settings for reporting CID references back to
+// the blobscan REST API.
+type BlobscanConfig struct {
+	APIURL string `yaml:"api_url"` // e.g. http://blobscan:3001
+	APIKey string `yaml:"api_key"` // value of IPFS_STORAGE_API_KEY in blobscan
 }
 
 // NetworkConfig identifies the Ethereum network being indexed.
@@ -91,6 +99,12 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("IPFS_SKIP_UPLOAD"); v == "true" || v == "1" {
 		c.IPFS.SkipUpload = true
+	}
+	if v := os.Getenv("BLOBSCAN_API_URL"); v != "" {
+		c.Blobscan.APIURL = v
+	}
+	if v := os.Getenv("BLOBSCAN_API_KEY"); v != "" {
+		c.Blobscan.APIKey = v
 	}
 }
 

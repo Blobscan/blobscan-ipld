@@ -19,6 +19,7 @@ import (
 
 	"github.com/blobscan/blobscan-ipld/api"
 	"github.com/blobscan/blobscan-ipld/beacon"
+	"github.com/blobscan/blobscan-ipld/blobscan"
 	"github.com/blobscan/blobscan-ipld/builder"
 	"github.com/blobscan/blobscan-ipld/config"
 	"github.com/blobscan/blobscan-ipld/db"
@@ -35,6 +36,7 @@ type Generator struct {
 	ipfs        *ipfs.Client
 	db          *db.Client
 	state       state.Backend
+	notifier    *blobscan.Notifier // nil when blobscan.api_url is not configured
 	log         *slog.Logger
 	genesisTime time.Time // zero if not yet fetched or beacon unavailable
 }
@@ -97,13 +99,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 		log.Info("✓ Using file-based state backend", "path", cfg.Storage.DataDir)
 	}
 
+	notifier := blobscan.NewNotifier(cfg.Blobscan.APIURL, cfg.Blobscan.APIKey, log)
+	if notifier != nil {
+		log.Info("✓ Blobscan notifier enabled", "api_url", cfg.Blobscan.APIURL)
+	}
+
 	g := &Generator{
-		cfg:    cfg,
-		beacon: beaconClient,
-		ipfs:   ipfsClient,
-		db:     dbClient,
-		state:  stateBackend,
-		log:    log,
+		cfg:      cfg,
+		beacon:   beaconClient,
+		ipfs:     ipfsClient,
+		db:       dbClient,
+		state:    stateBackend,
+		notifier: notifier,
+		log:      log,
 	}
 
 	if beaconClient != nil {
@@ -490,6 +498,10 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		}
 	}
 
+	if !fromCache {
+		g.notifier.NotifyBlobs(ctx, buildReferences(epochInp.Blobs, blobResults))
+	}
+
 	g.log.Debug("epoch complete", "epoch", epoch)
 	return nil
 }
@@ -597,6 +609,12 @@ func (g *Generator) ProcessBlobInput(ctx context.Context, req api.BlobPushReques
 		"data_cid", res.DataCID,
 		"meta_cid", res.MetaCID,
 	)
+
+	g.notifier.NotifyBlobs(ctx, []blobscan.BlobReference{{
+		VersionedHash: req.VersionedHash,
+		DataCID:       res.DataCID.String(),
+		MetaCID:       res.MetaCID.String(),
+	}})
 
 	return api.BlobPushResponse{
 		DataCID:    res.DataCID.String(),
@@ -867,4 +885,18 @@ func pluralize(count int) string {
 		return ""
 	}
 	return "s"
+}
+
+// buildReferences zips BlobInputs and BlobResults into BlobReference slices for
+// the blobscan notifier.
+func buildReferences(blobs []types.BlobInput, results []types.BlobResult) []blobscan.BlobReference {
+	refs := make([]blobscan.BlobReference, len(blobs))
+	for i := range blobs {
+		refs[i] = blobscan.BlobReference{
+			VersionedHash: blobs[i].VersionedHash,
+			DataCID:       results[i].DataCID.String(),
+			MetaCID:       results[i].MetaCID.String(),
+		}
+	}
+	return refs
 }
