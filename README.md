@@ -49,9 +49,11 @@ builder.BuildEpochNode()
         └─► builder.BuildNetworkRoot() → NetworkRoot dag-cbor (rebuilt per epoch)
 ```
 
-The generator polls every `poll_interval`. On restart it resumes from the last
-processed epoch — from `MAX(epoch)` in PostgreSQL when DB is configured, or
-from `<data_dir>/<network>-state.json` otherwise.
+When PostgreSQL is configured, the generator runs a **live** goroutine (polls
+every `poll_interval` for newly finalized epochs) and a **backfill** goroutine
+(crawls history from `start_epoch` concurrently) so a fresh deployment stays
+current while catching up. On restart both cursors resume from `ipld_state`.
+Without PostgreSQL the original sequential loop is used instead.
 
 ### Push API mode (`serve`)
 

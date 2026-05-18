@@ -436,11 +436,12 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 
 	if g.db != nil {
 		g.log.Info("saving to database", "epoch", epoch, "blobs", len(blobResults))
-		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobResults)); err != nil {
+		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
+		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobResults), epochTime); err != nil {
 			return fmt.Errorf("save epoch %d to db: %w", epoch, err)
 		}
 		if !fromCache {
-			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults); err != nil {
+			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults, g.genesisTime); err != nil {
 				return fmt.Errorf("save blobs epoch %d to db: %w", epoch, err)
 			}
 		}
@@ -542,7 +543,7 @@ func (g *Generator) ProcessBlobInput(ctx context.Context, req api.BlobPushReques
 
 	// Persist blob record to DB (epoch row may not exist yet; SaveBlobs handles that).
 	if g.db != nil {
-		if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, req.Epoch, []types.BlobInput{inp}, []types.BlobResult{res}); err != nil {
+		if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, req.Epoch, []types.BlobInput{inp}, []types.BlobResult{res}, g.genesisTime); err != nil {
 			return api.BlobPushResponse{}, fmt.Errorf("save blob to db: %w", err)
 		}
 	}
@@ -615,10 +616,10 @@ func (g *Generator) finalizeEpochInner(ctx context.Context, epoch uint64) (cid.C
 		return cid.Cid{}, err
 	}
 
-	if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobs)); err != nil {
+	epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
+	if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobs), epochTime); err != nil {
 		return cid.Cid{}, fmt.Errorf("save epoch %d to db: %w", epoch, err)
 	}
-	// db is guaranteed non-nil here (checked at the top of finalizeEpochInner)
 
 	if err := g.rebuildNetworkRoot(ctx); err != nil {
 		g.log.Warn("network root rebuild failed (non-fatal)", "epoch", epoch, "err", err)

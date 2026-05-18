@@ -5,6 +5,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS ipld_epochs (
     epoch          BIGINT      PRIMARY KEY,
     network        TEXT        NOT NULL,
     slot           BIGINT      NOT NULL,
+    epoch_time     TIMESTAMPTZ,
     cid            TEXT        NOT NULL,
     car_path       TEXT        NOT NULL,
     blob_count     INT         NOT NULL,
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS ipld_blobs (
     commitment     TEXT        PRIMARY KEY,
     epoch          BIGINT      NOT NULL REFERENCES ipld_epochs(epoch),
     slot           BIGINT      NOT NULL,
+    slot_time      TIMESTAMPTZ,
     network        TEXT        NOT NULL,
     blob_index     INT         NOT NULL,
     data_cid       TEXT        NOT NULL,
@@ -75,23 +78,44 @@ CREATE TABLE IF NOT EXISTS ipld_state (
 );
 `
 
+// migrations runs ALTER TABLE statements that add columns to existing tables.
+// Each statement uses IF NOT EXISTS so it is safe to run on every startup.
+const migrations = `
+ALTER TABLE ipld_epochs ADD COLUMN IF NOT EXISTS epoch_time TIMESTAMPTZ;
+ALTER TABLE ipld_blobs  ADD COLUMN IF NOT EXISTS slot_time  TIMESTAMPTZ;
+`
+
 func (c *Client) migrate(ctx context.Context) error {
-	_, err := c.pool.Exec(ctx, schema)
-	if err != nil {
+	if _, err := c.pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("db: apply schema: %w", err)
 	}
+	if _, err := c.pool.Exec(ctx, migrations); err != nil {
+		return fmt.Errorf("db: apply migrations: %w", err)
+	}
 	return nil
+}
+
+// nullTime returns nil when t is zero (maps to SQL NULL) and a pointer
+// to t otherwise (maps to TIMESTAMPTZ).
+func nullTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // ─── Write operations ─────────────────────────────────────────────────────────
 
 // SaveEpoch inserts or updates a row in ipld_epochs for the given result.
+// epochTime is the timestamp of the epoch's first slot; pass a zero time when
+// genesis time is unavailable (stored as NULL).
 // It is idempotent: re-processing the same epoch overwrites the previous row.
-func (c *Client) SaveEpoch(ctx context.Context, network string, result types.EpochResult, blobCount int) error {
+func (c *Client) SaveEpoch(ctx context.Context, network string, result types.EpochResult, blobCount int, epochTime time.Time) error {
 	_, err := c.pool.Exec(ctx, `
-		INSERT INTO ipld_epochs (epoch, network, slot, cid, car_path, blob_count, size_bytes)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO ipld_epochs (epoch, network, slot, epoch_time, cid, car_path, blob_count, size_bytes)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (epoch) DO UPDATE SET
+			epoch_time = EXCLUDED.epoch_time,
 			cid        = EXCLUDED.cid,
 			car_path   = EXCLUDED.car_path,
 			blob_count = EXCLUDED.blob_count,
@@ -100,7 +124,8 @@ func (c *Client) SaveEpoch(ctx context.Context, network string, result types.Epo
 	`,
 		result.Epoch,
 		network,
-		result.Epoch*32, // first slot of epoch
+		result.Epoch*32,
+		nullTime(epochTime),
 		result.CID.String(),
 		result.CARPath,
 		blobCount,
@@ -113,8 +138,10 @@ func (c *Client) SaveEpoch(ctx context.Context, network string, result types.Epo
 }
 
 // SaveBlobs inserts or updates one row per blob in ipld_blobs.
+// genesisTime is used to compute each blob's slot_time; pass a zero time when
+// genesis time is unavailable (slot_time stored as NULL).
 // It is idempotent: re-processing the same commitment overwrites the previous row.
-func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, blobs []types.BlobInput, results []types.BlobResult) error {
+func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, blobs []types.BlobInput, results []types.BlobResult, genesisTime time.Time) error {
 	if len(blobs) != len(results) {
 		return fmt.Errorf("db: SaveBlobs: blobs/results length mismatch (%d vs %d)", len(blobs), len(results))
 	}
@@ -127,12 +154,18 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 
 	for i, inp := range blobs {
 		res := results[i]
+		var slotTime *time.Time
+		if !genesisTime.IsZero() {
+			t := genesisTime.Add(time.Duration(inp.Slot) * 12 * time.Second)
+			slotTime = &t
+		}
 		_, err := tx.Exec(ctx, `
 			INSERT INTO ipld_blobs
-				(commitment, epoch, slot, network, blob_index, data_cid, meta_cid,
+				(commitment, epoch, slot, slot_time, network, blob_index, data_cid, meta_cid,
 				 versioned_hash, tx_hash, block_number, block_hash, size_bytes)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 			ON CONFLICT (commitment) DO UPDATE SET
+				slot_time      = EXCLUDED.slot_time,
 				data_cid       = EXCLUDED.data_cid,
 				meta_cid       = EXCLUDED.meta_cid,
 				versioned_hash = EXCLUDED.versioned_hash,
@@ -144,6 +177,7 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 			inp.Commitment,
 			epoch,
 			inp.Slot,
+			slotTime,
 			network,
 			inp.Index,
 			res.DataCID.String(),
@@ -287,6 +321,7 @@ type BlobRecord struct {
 	MetaCID       string
 	BlobIndex     int
 	Slot          uint64
+	SlotTime      *time.Time
 	VersionedHash string
 	TxHash        string
 	BlockNumber   uint64
@@ -297,7 +332,7 @@ type BlobRecord struct {
 func (c *Client) GetBlobsByEpoch(ctx context.Context, epoch uint64) ([]BlobRecord, error) {
 	rows, err := c.pool.Query(ctx,
 		`SELECT commitment, data_cid, meta_cid, blob_index,
-		        slot, versioned_hash, tx_hash, block_number, block_hash, size_bytes
+		        slot, slot_time, versioned_hash, tx_hash, block_number, block_hash, size_bytes
 		 FROM ipld_blobs WHERE epoch = $1 ORDER BY blob_index`,
 		epoch,
 	)
@@ -310,7 +345,7 @@ func (c *Client) GetBlobsByEpoch(ctx context.Context, epoch uint64) ([]BlobRecor
 	for rows.Next() {
 		var r BlobRecord
 		if err := rows.Scan(&r.Commitment, &r.DataCID, &r.MetaCID, &r.BlobIndex,
-			&r.Slot, &r.VersionedHash, &r.TxHash, &r.BlockNumber, &r.BlockHash, &r.SizeBytes); err != nil {
+			&r.Slot, &r.SlotTime, &r.VersionedHash, &r.TxHash, &r.BlockNumber, &r.BlockHash, &r.SizeBytes); err != nil {
 			return nil, fmt.Errorf("db: scan blob row: %w", err)
 		}
 		out = append(out, r)
