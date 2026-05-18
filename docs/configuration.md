@@ -17,6 +17,7 @@ Identifies the Ethereum network being indexed.
 |-------|------|----------|---------|-------------|
 | `name` | string | **yes** | — | Network identifier used in node fields, file paths, and the state file name. E.g. `"mainnet"`, `"sepolia"`, `"holesky"` |
 | `beacon_rpc` | string | no | `""` | Base URL of the Beacon Node REST API. E.g. `"http://localhost:5052"`. Required for beacon-pull mode (`run` / `epoch` subcommands); not needed for the push API (`serve`) |
+| `beacon_timeout` | duration | no | `60s` | HTTP request timeout for all Beacon Node API calls |
 
 ---
 
@@ -28,7 +29,7 @@ Connection settings for the IPFS node (Kubo-compatible).
 |-------|------|----------|---------|-------------|
 | `api_addr` | string | conditional | — | IPFS HTTP RPC address. Accepts multiaddr (`/ip4/127.0.0.1/tcp/5001`) or plain URL (`http://127.0.0.1:5001`). Required unless `skip_upload: true` |
 | `pin_on_add` | bool | no | `false` | If `true`, recursively pins each epoch CID after uploading its blocks |
-| `timeout` | duration | no | `30s` | HTTP request timeout for all IPFS API calls. Also used as the Beacon Node client timeout |
+| `timeout` | duration | no | `30s` | HTTP request timeout for all IPFS API calls |
 | `skip_upload` | bool | no | `false` | If `true`, skip all IPFS interaction. CIDs are still computed deterministically and saved to the database. Useful for DB-only indexing without running an IPFS node. When set, `api_addr` is not required |
 
 ---
@@ -183,13 +184,14 @@ explicitly if genesis-era slots predate EIP-4844.
 
 ## Environment variable overrides
 
-Three fields can be overridden at runtime via environment variables without
+Several fields can be overridden at runtime via environment variables without
 editing the YAML file. Environment variables take precedence over the file.
 
 | Variable | Config field overridden |
 |----------|------------------------|
 | `NETWORK_NAME` | `network.name` |
 | `BEACON_RPC` | `network.beacon_rpc` |
+| `BEACON_TIMEOUT` | `network.beacon_timeout` |
 | `POSTGRES_DSN` | `storage.postgres_dsn` |
 | `IPFS_API_ADDR` | `ipfs.api_addr` |
 | `IPFS_SKIP_UPLOAD` | `ipfs.skip_upload` (set to `true` or `1` to enable) |

@@ -18,8 +18,9 @@ type Config struct {
 
 // NetworkConfig identifies the Ethereum network being indexed.
 type NetworkConfig struct {
-	Name      string `yaml:"name"`       // e.g. "mainnet", "sepolia"
-	BeaconRPC string `yaml:"beacon_rpc"` // Beacon node REST API base URL (optional when using the push API)
+	Name          string        `yaml:"name"`           // e.g. "mainnet", "sepolia"
+	BeaconRPC     string        `yaml:"beacon_rpc"`     // Beacon node REST API base URL (optional when using the push API)
+	BeaconTimeout time.Duration `yaml:"beacon_timeout"` // HTTP timeout for beacon requests (optional; default 60s)
 }
 
 // IPFSConfig holds connection settings for the IPFS node.
@@ -75,6 +76,11 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("BEACON_RPC"); v != "" {
 		c.Network.BeaconRPC = v
+	}
+	if v := os.Getenv("BEACON_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Network.BeaconTimeout = d
+		}
 	}
 	if v := os.Getenv("POSTGRES_DSN"); v != "" {
 		c.Storage.PostgresDSN = v
@@ -132,6 +138,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.IPFS.Timeout == 0 {
 		c.IPFS.Timeout = 30 * time.Second
+	}
+	if c.Network.BeaconTimeout == 0 {
+		c.Network.BeaconTimeout = 60 * time.Second
 	}
 	if c.Generator.StartEpoch == 0 {
 		if epoch, ok := dencunEpoch(c.Network.Name); ok {
