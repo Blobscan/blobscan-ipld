@@ -158,9 +158,14 @@ func (g *Generator) Run(ctx context.Context) error {
 		backfillStart = backfillCursor + 1
 	}
 
-	// First run (live cursor not yet set): anchor the live goroutine at the
-	// current tip so it only processes new epochs, and hand history to backfill.
-	if liveCursor == 0 && backfillStart < currentFinalized {
+	// Anchor the live goroutine at the current tip whenever backfill has not yet
+	// started (backfillCursor == 0). This covers two cases:
+	//   1. Fresh deployment — no epochs in DB yet.
+	//   2. Migration from the old sequential loop — liveCursor holds the last
+	//      epoch the sequential loop processed (MAX(epoch) fallback), not a
+	//      value written by the parallel live goroutine. Without re-anchoring,
+	//      runLive would process the entire historical gap sequentially.
+	if backfillCursor == 0 && backfillStart < currentFinalized {
 		liveCursor = currentFinalized - 1
 		if err := g.state.SetLastProcessedEpoch(ctx, liveCursor); err != nil {
 			return fmt.Errorf("generator: init live cursor: %w", err)
@@ -753,7 +758,7 @@ func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochI
 			return nil, nil, r.err
 		}
 		blobResults[r.idx] = r.res
-		g.log.Info("blob processed",
+		g.log.Debug("blob processed",
 			"epoch", epochInp.Epoch,
 			"slot", epochInp.Blobs[r.idx].Slot,
 			"index", epochInp.Blobs[r.idx].Index,
