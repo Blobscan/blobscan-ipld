@@ -526,29 +526,38 @@ ipfs repo gc
 
 ## Monitoring
 
-The generator logs structured key-value pairs to stderr. Key log lines:
+The generator logs structured key-value pairs to stderr with visual symbols for clarity. Key log lines:
 
-| Event | Level | Key fields |
-|-------|-------|-----------|
-| Generator started | `INFO` | `network`, `poll_interval` |
-| New finalized epochs detected | `INFO` | `from`, `to` |
-| Processing epoch | `INFO` | `epoch` |
-| Epoch node built | `INFO` | `epoch`, `cid`, `blobs`, `size_bytes` |
-| Using DB state backend | `INFO` | — |
-| Using file state backend | `INFO` | `path` |
-| DB disabled (postgres_dsn not set) | `WARN` | — |
-| No new finalized epochs | `DEBUG` | `finalized`, `last_processed` |
-| Any processing error | `ERROR` | `err` |
+| Event | Symbol | Level | Details |
+|-------|--------|-------|---------|
+| Startup banner | — | `INFO` | Engine initialization message |
+| Beacon network verified | ✓ | `INFO` | Network name confirmation |
+| State backend loaded | ✓ | `INFO` | PostgreSQL or file-based backend |
+| Genesis time loaded | ✓ | `INFO` | Network genesis timestamp |
+| Parallel processing enabled | ┌─ | `INFO` | Live and backfill cursors |
+| Live processing started | ▶ | `INFO` | Polling for new epochs |
+| New finalized epochs | ▲ | `INFO` | Count and range of new epochs |
+| Backfill started | ⟲ | `INFO` | Epoch range being backfilled |
+| Epoch built (live) | ● | `INFO` | From live processing |
+| Epoch built (backfill) | ■ | `INFO` | From backfill processing |
+| IPFS upload disabled | ⊘ | `INFO` | CIDs computed but not uploaded |
+| No new finalized epochs | — | `DEBUG` | No work needed this tick |
+| Any processing error | ✗ | `ERROR` | Detailed error information |
 
 ### Example log output
 
 ```
-time=2024-03-15T10:00:00Z level=INFO msg="generator starting" network=mainnet poll_interval=12s
-time=2024-03-15T10:00:01Z level=INFO msg="new finalized epochs detected" from=269568 to=269600
-time=2024-03-15T10:00:01Z level=INFO msg="processing epoch" epoch=269568
-time=2024-03-15T10:00:03Z level=INFO msg="epoch node built" epoch=269568 cid=bafyrei... blobs=28 size_bytes=3670016
-time=2024-03-15T10:00:03Z level=INFO msg="CAR v2 exported" path=/var/lib/blobscan-ipld/mainnet/car/mainnet/269568.car cid=bafyrei...
-time=2024-03-15T10:00:04Z level=INFO msg="processing epoch" epoch=269569
+time=2024-03-15T10:00:00Z level=INFO msg="
+╔═══════════════════════════════════════════════════════════╗
+║                  blobscan-ipld engine                    ║
+║         Building IPLD DAGs from Ethereum blobs           ║
+╚═══════════════════════════════════════════════════════════╝"
+time=2024-03-15T10:00:01Z level=INFO msg="✓ Beacon network verified" network=mainnet
+time=2024-03-15T10:00:01Z level=INFO msg="✓ Genesis time loaded" genesis_time=2020-12-01T12:00:23Z
+time=2024-03-15T10:00:01Z level=INFO msg="▶ Live processing started [mainnet] — polling every 12s"
+time=2024-03-15T10:00:02Z level=INFO msg="▲ 33 epochs finalized [269568 .. 269600]"
+time=2024-03-15T10:00:02Z level=INFO msg="● Epoch 269568 built [28 blobs] bafyrei..."
+time=2024-03-15T10:00:03Z level=INFO msg="● Epoch 269569 built [31 blobs] bafyrei..."
 ...
 ```
 
