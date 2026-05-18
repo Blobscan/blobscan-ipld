@@ -113,12 +113,11 @@ func (c *Client) PutBlock(ctx context.Context, blk blocks.Block) error {
 	return nil
 }
 
-// ProgressFunc is called during batch uploads with the current index, total
-// count, the CID of the block, and whether it was skipped (already existed).
-type ProgressFunc func(current, total int, blockCID string, skipped bool)
+// ProgressFunc is called during batch uploads with the current index and total count.
+type ProgressFunc func(current, total int, blockCID string)
 
 // PutBlockstore uploads all blocks from a MemBlockstore to the IPFS node.
-// Blocks that already exist on the node are skipped.
+// block/put is idempotent on Kubo — uploading an already-present block is a no-op.
 // An optional ProgressFunc is called after each block is processed.
 func (c *Client) PutBlockstore(ctx context.Context, bs *store.MemBlockstore, progress ...ProgressFunc) error {
 	blks := bs.All()
@@ -127,17 +126,11 @@ func (c *Client) PutBlockstore(ctx context.Context, bs *store.MemBlockstore, pro
 		fn = progress[0]
 	}
 	for i, blk := range blks {
-		exists, err := c.HasBlock(ctx, blk.Cid())
-		if err != nil {
-			return fmt.Errorf("ipfs: check block %d/%d (%s): %w", i+1, len(blks), blk.Cid(), err)
-		}
-		if !exists {
-			if err := c.PutBlock(ctx, blk); err != nil {
-				return fmt.Errorf("ipfs: put block %d/%d (%s): %w", i+1, len(blks), blk.Cid(), err)
-			}
+		if err := c.PutBlock(ctx, blk); err != nil {
+			return fmt.Errorf("ipfs: put block %d/%d (%s): %w", i+1, len(blks), blk.Cid(), err)
 		}
 		if fn != nil {
-			fn(i+1, len(blks), blk.Cid().String(), exists)
+			fn(i+1, len(blks), blk.Cid().String())
 		}
 	}
 	return nil

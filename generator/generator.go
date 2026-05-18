@@ -464,19 +464,15 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 	}
 	total := bs.Len()
 	g.log.Info("uploading blocks to IPFS", "epoch", epoch, "blocks", total)
-	var skipped int
-	progress := func(current, count int, blockCID string, exists bool) {
-		if exists {
-			skipped++
-		}
+	progress := func(current, count int, blockCID string) {
 		if current == count || current%10 == 0 {
-			g.log.Info("IPFS upload progress", "epoch", epoch, "blocks", fmt.Sprintf("%d/%d", current, count), "skipped", skipped, "cid", blockCID)
+			g.log.Info("IPFS upload progress", "epoch", epoch, "blocks", fmt.Sprintf("%d/%d", current, count), "cid", blockCID)
 		}
 	}
 	if err := g.ipfs.PutBlockstore(ctx, bs, progress); err != nil {
 		return fmt.Errorf("upload epoch %d to IPFS: %w", epoch, err)
 	}
-	g.log.Info("IPFS upload complete", "epoch", epoch, "total", total, "uploaded", total-skipped, "skipped", skipped)
+	g.log.Info("IPFS upload complete", "epoch", epoch, "total", total)
 	if g.cfg.IPFS.PinOnAdd {
 		if err := g.ipfs.Pin(ctx, epochCID); err != nil {
 			g.log.Warn("pin epoch failed (non-fatal)", "epoch", epoch, "cid", epochCID, "err", err)
