@@ -37,8 +37,6 @@ type Generator struct {
 	state       state.Backend
 	log         *slog.Logger
 	genesisTime time.Time // zero if not yet fetched or beacon unavailable
-	mu          sync.Mutex
-	rpcRequests int64 // counter for RPC calls to beacon node
 }
 
 // epochProgress carries batch-level progress state for ETA calculation.
@@ -115,14 +113,12 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 		} else if remoteNetwork != cfg.Network.Name {
 			return nil, fmt.Errorf("generator: network mismatch: config says %q but beacon node reports %q", cfg.Network.Name, remoteNetwork)
 		} else {
-			g.incRPCRequests()
 			log.Info("✓ Beacon network verified [" + remoteNetwork + "]")
 		}
 
 		if gt, err := beaconClient.GetGenesisTime(ctx); err != nil {
 			log.Warn("⚠ Could not fetch genesis time; block timestamps will be omitted", "err", err)
 		} else {
-			g.incRPCRequests()
 			g.genesisTime = gt
 			log.Info("✓ Genesis time loaded", "genesis_time", gt.Format(time.RFC3339))
 		}
@@ -163,7 +159,6 @@ func (g *Generator) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("generator: get initial finality checkpoints: %w", err)
 	}
-	g.incRPCRequests()
 	currentFinalized := checkpoints.FinalizedEpoch
 
 	liveCursor, err := g.state.GetLastProcessedEpoch(ctx)
@@ -284,7 +279,6 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("generator: get finality checkpoints: %w", err)
 	}
-	g.incRPCRequests()
 
 	liveCursor, err := g.state.GetLastProcessedEpoch(ctx)
 	if err != nil {
@@ -431,7 +425,6 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		if err != nil {
 			return fmt.Errorf("fetch epoch %d: %w", epoch, err)
 		}
-		g.incRPCRequests()
 
 		if len(epochInp.Blobs) == 0 {
 			g.log.Info("epoch has no blobs, skipping", "epoch", epoch)
@@ -470,9 +463,13 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 			srcIcon = "■"
 		}
 	}
+	var rpcCount int64
+	if g.beacon != nil {
+		rpcCount = g.beacon.GetRPCRequestCount()
+	}
 	g.log.Info(fmt.Sprintf("%s Epoch %d built [%d blobs]", srcIcon, epoch, len(blobResults)),
 		"cid", epochResult.CID.String(),
-		"rpc_requests", g.getRPCRequests())
+		"rpc_requests", rpcCount)
 
 	if epochBS != nil {
 		if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
@@ -870,18 +867,4 @@ func pluralize(count int) string {
 		return ""
 	}
 	return "s"
-}
-
-// incRPCRequests atomically increments the RPC request counter.
-func (g *Generator) incRPCRequests() {
-	g.mu.Lock()
-	g.rpcRequests++
-	g.mu.Unlock()
-}
-
-// getRPCRequests atomically reads the RPC request counter.
-func (g *Generator) getRPCRequests() int64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.rpcRequests
 }

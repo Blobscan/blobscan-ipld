@@ -528,21 +528,29 @@ ipfs repo gc
 
 The generator logs structured key-value pairs to stderr with visual symbols for clarity. Key log lines:
 
-| Event | Symbol | Level | Details |
-|-------|--------|-------|---------|
+| Event | Symbol | Level | Key fields |
+|-------|--------|-------|-----------|
 | Startup banner | — | `INFO` | Engine initialization message |
-| Beacon network verified | ✓ | `INFO` | Network name confirmation |
-| State backend loaded | ✓ | `INFO` | PostgreSQL or file-based backend |
+| Beacon network verified | ✓ | `INFO` | Network name |
+| State backend loaded | ✓ | `INFO` | Backend type and path |
 | Genesis time loaded | ✓ | `INFO` | Network genesis timestamp |
 | Parallel processing enabled | ┌─ | `INFO` | Live and backfill cursors |
-| Live processing started | ▶ | `INFO` | Polling for new epochs |
-| New finalized epochs | ▲ | `INFO` | Count and range of new epochs |
-| Backfill started | ⟲ | `INFO` | Epoch range being backfilled |
-| Epoch built (live) | ● | `INFO` | From live processing |
-| Epoch built (backfill) | ■ | `INFO` | From backfill processing |
-| IPFS upload disabled | ⊘ | `INFO` | CIDs computed but not uploaded |
-| No new finalized epochs | — | `DEBUG` | No work needed this tick |
-| Any processing error | ✗ | `ERROR` | Detailed error information |
+| Live processing started | ▶ | `INFO` | Network, poll interval |
+| New finalized epochs | ▲ | `INFO` | Count and epoch range |
+| Backfill started | ⟲ | `INFO` | Epoch range, total count |
+| Epoch built (live) | ● | `INFO` | `cid`, `rpc_requests`, blob count |
+| Epoch built (backfill) | ■ | `INFO` | `cid`, `rpc_requests`, blob count |
+| IPFS upload disabled | ⊘ | `INFO` | — |
+| No new finalized epochs | — | `DEBUG` | Finalized epoch, cursor |
+| Any processing error | ✗ | `ERROR` | Error details |
+
+**RPC Request Counting:** The `rpc_requests` field in epoch-built logs shows the cumulative count of all HTTP requests made to the beacon node since startup. This includes:
+- Finality checkpoints (1 per live tick + 1 startup)
+- Blob sidecars (32 per epoch processed)
+- Network verification (1 startup)
+- Genesis time fetch (1 startup)
+
+This counter is useful for tracking and comparing with your billing dashboard if you use a remote RPC provider.
 
 ### Example log output
 
@@ -556,10 +564,14 @@ time=2024-03-15T10:00:01Z level=INFO msg="✓ Beacon network verified" network=m
 time=2024-03-15T10:00:01Z level=INFO msg="✓ Genesis time loaded" genesis_time=2020-12-01T12:00:23Z
 time=2024-03-15T10:00:01Z level=INFO msg="▶ Live processing started [mainnet] — polling every 12s"
 time=2024-03-15T10:00:02Z level=INFO msg="▲ 33 epochs finalized [269568 .. 269600]"
-time=2024-03-15T10:00:02Z level=INFO msg="● Epoch 269568 built [28 blobs] bafyrei..."
-time=2024-03-15T10:00:03Z level=INFO msg="● Epoch 269569 built [31 blobs] bafyrei..."
+time=2024-03-15T10:00:02Z level=INFO msg="● Epoch 269568 built [28 blobs]" cid=bafyreid... rpc_requests=35
+time=2024-03-15T10:00:03Z level=INFO msg="● Epoch 269569 built [31 blobs]" cid=bafyreia... rpc_requests=68
+time=2024-03-15T10:00:04Z level=INFO msg="⟲ Backfill: 100 epochs [134500 → 134599]"
+time=2024-03-15T10:00:05Z level=INFO msg="■ Epoch 134500 built [45 blobs]" cid=bafyreif... rpc_requests=3235
 ...
 ```
+
+Note: `rpc_requests` shows cumulative request count since startup.
 
 ---
 

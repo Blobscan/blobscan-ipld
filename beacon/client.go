@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -32,6 +33,8 @@ type Client struct {
 	base        string
 	http        *http.Client
 	slotWorkers int // parallel slot fetches inside FetchEpochInput
+	mu          sync.Mutex
+	rpcRequests int64 // counter for total RPC requests made to beacon node
 }
 
 // NewClient creates a new Beacon Node client.
@@ -326,6 +329,11 @@ func (c *Client) get(ctx context.Context, url string, out interface{}) error {
 	}
 	defer resp.Body.Close()
 
+	// Increment RPC request counter after request is made
+	c.mu.Lock()
+	c.rpcRequests++
+	c.mu.Unlock()
+
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("not found (404): %s", url)
 	}
@@ -339,6 +347,13 @@ func (c *Client) get(ctx context.Context, url string, out interface{}) error {
 	}
 
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// GetRPCRequestCount returns the total number of RPC requests made to the beacon node.
+func (c *Client) GetRPCRequestCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rpcRequests
 }
 
 func isNotFound(err error) bool {
