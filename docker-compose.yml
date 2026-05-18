@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: blobscan
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ipld_mainnet
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blobscan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ipfs:
+    image: ipfs/kubo:latest
+    restart: unless-stopped
+    volumes:
+      - ipfs_data:/data/ipfs
+    ports:
+      - "4001:4001"
+      - "127.0.0.1:5001:5001"
+      - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD", "ipfs", "id"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  blobscan-ipld:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/etc/blobscan-ipld/config.yaml:ro
+      - blobscan_data:/data
+      - blobscan_car:/car
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      NETWORK_NAME: mainnet
+      BEACON_RPC: "${BEACON_RPC:?BEACON_RPC is required}"
+      POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_mainnet?sslmode=disable"
+    command: ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
+
+volumes:
+  postgres_data:
+  ipfs_data:
+  blobscan_data:
+  blobscan_car:
