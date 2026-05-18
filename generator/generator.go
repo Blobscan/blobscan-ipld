@@ -49,6 +49,13 @@ type epochProgress struct {
 
 // New creates a new Generator from the given configuration.
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator, error) {
+	// Log startup banner
+	log.Info("\n" +
+		"╔═══════════════════════════════════════════════════════════╗\n" +
+		"║                  blobscan-ipld engine                    ║\n" +
+		"║         Building IPLD DAGs from Ethereum blobs           ║\n" +
+		"╚═══════════════════════════════════════════════════════════╝")
+
 	var beaconClient *beacon.Client
 	if cfg.Network.BeaconRPC != "" {
 		beaconClient = beacon.NewClient(cfg.Network.BeaconRPC, cfg.IPFS.Timeout)
@@ -62,7 +69,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 			return nil, fmt.Errorf("generator: create ipfs client: %w", err)
 		}
 	} else {
-		log.Info("IPFS upload disabled (skip_upload=true); CIDs will be computed but not uploaded")
+		log.Info("⊘ IPFS upload disabled (skip_upload=true); CIDs will be computed but not uploaded")
 	}
 
 	var dbClient *db.Client
@@ -79,7 +86,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 	var stateBackend state.Backend
 	if dbClient != nil {
 		stateBackend = db.NewDBStateBackend(dbClient, cfg.Network.Name)
-		log.Info("using DB state backend")
+		log.Info("✓ Using PostgreSQL state backend")
 	} else {
 		// Fall back to the JSON file-based state manager.
 		stateMgr, err := state.NewManager(cfg.Storage.DataDir, cfg.Network.Name)
@@ -87,7 +94,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 			return nil, fmt.Errorf("generator: load state: %w", err)
 		}
 		stateBackend = stateMgr
-		log.Info("using file state backend", "path", cfg.Storage.DataDir)
+		log.Info("✓ Using file-based state backend", "path", cfg.Storage.DataDir)
 	}
 
 	g := &Generator{
@@ -102,18 +109,18 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 	if beaconClient != nil {
 		remoteNetwork, err := beaconClient.GetNetworkName(ctx)
 		if err != nil {
-			log.Warn("could not verify beacon network name", "err", err)
+			log.Warn("⚠ Could not verify beacon network name", "err", err)
 		} else if remoteNetwork != cfg.Network.Name {
 			return nil, fmt.Errorf("generator: network mismatch: config says %q but beacon node reports %q", cfg.Network.Name, remoteNetwork)
 		} else {
-			log.Info("beacon network verified", "network", remoteNetwork)
+			log.Info("✓ Beacon network verified [" + remoteNetwork + "]")
 		}
 
 		if gt, err := beaconClient.GetGenesisTime(ctx); err != nil {
-			log.Warn("could not fetch genesis time; block timestamps will be omitted", "err", err)
+			log.Warn("⚠ Could not fetch genesis time; block timestamps will be omitted", "err", err)
 		} else {
 			g.genesisTime = gt
-			log.Info("beacon genesis time", "genesis_time", gt.Format(time.RFC3339))
+			log.Info("✓ Genesis time loaded", "genesis_time", gt.Format(time.RFC3339))
 		}
 	}
 
@@ -180,10 +187,8 @@ func (g *Generator) Run(ctx context.Context) error {
 		if err := g.state.SetLastProcessedEpoch(ctx, liveCursor); err != nil {
 			return fmt.Errorf("generator: set live cursor: %w", err)
 		}
-		g.log.Info("parallel mode: live anchored at current tip",
-			"live_from", currentFinalized,
-			"backfill_from", backfillStart,
-		)
+		g.log.Info("┌─ Parallel processing enabled\n│  ◄ live cursor anchored at: " +
+			fmt.Sprintf("%d\n│  ► backfill starting from: %d", currentFinalized, backfillStart))
 	}
 
 	// Launch backfill goroutine for all epochs before the live anchor.
@@ -237,10 +242,7 @@ func (g *Generator) runSequential(ctx context.Context) error {
 // runLive polls for newly finalized epochs and processes them. It blocks until
 // ctx is cancelled.
 func (g *Generator) runLive(ctx context.Context) error {
-	g.log.Info("live processing starting",
-		"network", g.cfg.Network.Name,
-		"poll_interval", g.cfg.Generator.PollInterval,
-	)
+	g.log.Info("▶ Live processing started [" + g.cfg.Network.Name + "] — polling every " + g.cfg.Generator.PollInterval.String())
 
 	ticker := time.NewTicker(g.cfg.Generator.PollInterval)
 	defer ticker.Stop()
@@ -295,7 +297,7 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 	}
 
 	total := int(finalizedEpoch-startEpoch) + 1
-	g.log.Info("new finalized epochs detected", "from", startEpoch, "to", finalizedEpoch, "total", total)
+	g.log.Info(fmt.Sprintf("▲ %d epoch%s finalized [%d .. %d]", total, pluralize(total), startEpoch, finalizedEpoch))
 
 	batchStart := time.Now()
 	for epoch := startEpoch; epoch <= finalizedEpoch; epoch++ {
@@ -325,7 +327,7 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 // after each epoch and rebuilds the NetworkRoot once at completion.
 func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uint64) error {
 	total := int(targetEpoch-startEpoch) + 1
-	g.log.Info("backfill starting", "from", startEpoch, "to", targetEpoch, "total", total)
+	g.log.Info(fmt.Sprintf("⟲ Backfill: %d epochs [%d → %d]", total, startEpoch, targetEpoch))
 
 	batchStart := time.Now()
 	for epoch := startEpoch; epoch <= targetEpoch; epoch++ {
@@ -452,15 +454,16 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 	}
 
 	src := ""
+	srcIcon := "◆"
 	if p != nil {
 		src = p.src
+		if src == "live" {
+			srcIcon = "●"
+		} else if src == "backfill" {
+			srcIcon = "■"
+		}
 	}
-	g.log.Info("epoch node built",
-		"src", src,
-		"epoch", epoch,
-		"cid", epochResult.CID,
-		"blobs", len(blobResults),
-	)
+	g.log.Info(fmt.Sprintf("%s Epoch %d built [%d blobs] %s", srcIcon, epoch, len(blobResults), epochResult.CID.String()[:12]+"…"))
 
 	if epochBS != nil {
 		if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
@@ -850,4 +853,12 @@ func hexDecode(s string) ([]byte, error) {
 	out := make([]byte, hex.DecodedLen(len(s)))
 	n, err := hex.Decode(out, []byte(s))
 	return out[:n], err
+}
+
+// pluralize returns the plural suffix for the given count.
+func pluralize(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
