@@ -88,6 +88,22 @@ docker compose -f docker-compose.sepolia.yml up -d
 The correct `start_epoch` for each network is applied automatically — no
 config file changes needed.
 
+### Useful commands
+
+```bash
+# Open a PostgreSQL shell (Sepolia)
+docker compose -f docker-compose.sepolia.yml exec postgres psql -U blobscan -d ipld_sepolia
+
+# Open a PostgreSQL shell (mainnet)
+docker compose exec postgres psql -U blobscan -d ipld_mainnet
+
+# Follow generator logs
+docker compose -f docker-compose.sepolia.yml logs -f blobscan-ipld
+
+# Check container status
+docker compose -f docker-compose.sepolia.yml ps
+```
+
 ### Ports exposed on localhost
 
 | Service | Port | Protocol |
