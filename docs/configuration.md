@@ -65,7 +65,7 @@ Controls DAG generation behaviour.
 | `epochs_per_range` | int | no | `1000` | Number of epochs to accumulate before building a `RangeNode` and exporting a CAR file |
 | `hamt_threshold` | int | no | `5000` | If a single epoch contains this many blobs or more, the blob index uses HAMT shards instead of a flat map |
 | `poll_interval` | duration | no | `12s` | How often to query the beacon node for new finalized epochs. One Ethereum slot is 12 s; one epoch is 6.4 min |
-| `start_epoch` | uint64 | no | `0` | First epoch to process when starting from scratch. Set to a higher value to skip genesis-era epochs that predate EIP-4844 |
+| `start_epoch` | uint64 | no | network default | First epoch to process when starting from scratch. When `0` (not set), the Deneb fork epoch is applied automatically for known networks (see table below). Override explicitly to resume from a specific epoch. |
 | `workers` | int | no | `4` | Number of goroutines in the parallel blob-processing worker pool per epoch |
 | `skip_existing_epochs` | bool | no | `false` | If `true` and a state file exists, start from `last_processed_epoch + 1` instead of `start_epoch` |
 
@@ -97,7 +97,7 @@ generator:
   epochs_per_range: 1000
   hamt_threshold: 5000
   poll_interval: 12s
-  start_epoch: 269568   # first epoch after EIP-4844 activation on mainnet
+  # start_epoch defaults to 269568 for mainnet; set explicitly to override
   workers: 8
   skip_existing_epochs: true
 ```
@@ -158,10 +158,42 @@ generator:
   epochs_per_range: 1000
   hamt_threshold: 5000
   poll_interval: 12s
-  start_epoch: 0
+  # start_epoch defaults to 132608 for sepolia
   workers: 4
   skip_existing_epochs: true
 ```
+
+### Default `start_epoch` by network
+
+When `start_epoch` is `0` (the default), the generator automatically uses the
+first epoch that contains blob sidecars for the configured network:
+
+| `network.name` | Default `start_epoch` | Fork / date |
+|----------------|-----------------------|-------------|
+| `mainnet`      | `269568`              | Dencun, Mar 13 2024 |
+| `sepolia`      | `132608`              | Dencun, Jan 30 2024 |
+| `gnosis`       | `889856`              | Dencun, Mar 11 2024 |
+| `hoodi`        | `0`                   | Launched post-Deneb |
+
+For any other network name the value stays `0` and you must set `start_epoch`
+explicitly if genesis-era slots predate EIP-4844.
+
+---
+
+## Environment variable overrides
+
+Three fields can be overridden at runtime via environment variables without
+editing the YAML file. Environment variables take precedence over the file.
+
+| Variable | Config field overridden |
+|----------|------------------------|
+| `NETWORK_NAME` | `network.name` |
+| `BEACON_RPC` | `network.beacon_rpc` |
+| `POSTGRES_DSN` | `storage.postgres_dsn` |
+
+This is the mechanism used by the Docker Compose files — a single `config.yaml`
+is shared across networks and the per-deployment values are injected via the
+container environment.
 
 ---
 

@@ -7,9 +7,16 @@ All exported symbols across every package. Internal helpers are omitted.
 ## Package `config`
 
 ### `func Load(path string) (*Config, error)`
-Reads a YAML file at `path`, validates required fields, applies defaults, and
-returns a `*Config`. Returns an error if the file cannot be read, the YAML is
-malformed, or any required field is missing.
+Reads a YAML file at `path`, then (in order): applies environment variable
+overrides (`NETWORK_NAME`, `BEACON_RPC`, `POSTGRES_DSN`),
+validates required fields, and fills in defaults. Returns a `*Config`. Returns
+an error if the file cannot be read, the YAML is malformed, or any required
+field is missing after overrides.
+
+### `func dencunEpoch(network string) (uint64, bool)`
+Returns the first epoch that contains blob sidecars for the given network name.
+Used internally by `applyDefaults` to set `StartEpoch` when it is not
+configured explicitly. Returns `(0, false)` for unknown networks.
 
 ### Types
 
@@ -41,7 +48,7 @@ type StorageConfig struct {
 type GeneratorConfig struct {
     HAMTThreshold      int
     PollInterval       time.Duration
-    StartEpoch         uint64
+    StartEpoch         uint64  // 0 = auto-set from dencunEpoch table
     Workers            int
     SkipExistingEpochs bool
     APIListen          string

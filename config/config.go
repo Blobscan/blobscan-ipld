@@ -58,12 +58,26 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parse %q: %w", path, err)
 	}
 
+	cfg.applyEnvOverrides()
+
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config: validation: %w", err)
 	}
 
 	cfg.applyDefaults()
 	return cfg, nil
+}
+
+func (c *Config) applyEnvOverrides() {
+	if v := os.Getenv("NETWORK_NAME"); v != "" {
+		c.Network.Name = v
+	}
+	if v := os.Getenv("BEACON_RPC"); v != "" {
+		c.Network.BeaconRPC = v
+	}
+	if v := os.Getenv("POSTGRES_DSN"); v != "" {
+		c.Storage.PostgresDSN = v
+	}
 }
 
 func (c *Config) validate() error {
@@ -77,6 +91,23 @@ func (c *Config) validate() error {
 		return fmt.Errorf("storage.data_dir is required")
 	}
 	return nil
+}
+
+// dencunEpoch returns the first epoch that has blob sidecars for known networks.
+// Returns (0, false) for unknown networks.
+func dencunEpoch(network string) (uint64, bool) {
+	switch network {
+	case "mainnet":
+		return 269568, true
+	case "sepolia":
+		return 132608, true
+	case "gnosis":
+		return 889856, true
+	case "hoodi":
+		return 0, true
+	default:
+		return 0, false
+	}
 }
 
 func (c *Config) applyDefaults() {
@@ -94,5 +125,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.IPFS.Timeout == 0 {
 		c.IPFS.Timeout = 30 * time.Second
+	}
+	if c.Generator.StartEpoch == 0 {
+		if epoch, ok := dencunEpoch(c.Network.Name); ok {
+			c.Generator.StartEpoch = epoch
+		}
 	}
 }

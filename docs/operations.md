@@ -52,6 +52,67 @@ required to serve the blob sidecars endpoint.
 
 ---
 
+## Docker Compose (recommended)
+
+The repository ships with two Compose files that start PostgreSQL, an IPFS
+(Kubo) node, and `blobscan-ipld` in a single command. No local Go toolchain or
+manual IPFS setup is required.
+
+### Quick start
+
+```bash
+cp .env.example .env
+# Edit .env — set POSTGRES_PASSWORD and the beacon RPC URL for your network
+```
+
+**.env variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `POSTGRES_PASSWORD` | Password for the `blobscan` PostgreSQL user |
+| `BEACON_RPC` | Beacon node REST API URL for mainnet |
+| `SEPOLIA_BEACON_RPC` | Beacon node REST API URL for Sepolia |
+
+**Mainnet:**
+
+```bash
+docker compose up -d
+```
+
+**Sepolia:**
+
+```bash
+docker compose -f docker-compose.sepolia.yml up -d
+```
+
+The correct `start_epoch` for each network is applied automatically — no
+config file changes needed.
+
+### Ports exposed on localhost
+
+| Service | Port | Protocol |
+|---------|------|----------|
+| blobscan-ipld HTTP push API | `8080` | HTTP |
+| IPFS API | `5001` | HTTP |
+| IPFS gateway | `8081` | HTTP |
+| IPFS swarm | `4001` | TCP/UDP |
+
+### GitHub Container Registry
+
+Pre-built images are published to `ghcr.io/blobscan/blobscan-ipld` on every
+push to `master` and for every version tag. To use them instead of building
+locally:
+
+```yaml
+# in docker-compose.yml, replace `build: .` with:
+image: ghcr.io/blobscan/blobscan-ipld:latest
+```
+
+Tags follow the pattern `latest`, `master`, `sha-<short>`, and `<semver>` for
+tagged releases.
+
+---
+
 ## IPFS node setup (Kubo + Badger)
 
 Kubo (the reference IPFS implementation) supports pluggable datastores. For
@@ -341,7 +402,7 @@ the normal poll loop.
 
 ```yaml
 generator:
-  start_epoch: 269568   # first EIP-4844 epoch on mainnet
+  # start_epoch defaults to 269568 on mainnet; override only if needed
   skip_existing_epochs: false
 ```
 
