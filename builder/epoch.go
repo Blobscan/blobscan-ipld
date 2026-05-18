@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/ipfs/go-cid"
 	"github.com/ipld/go-ipld-prime"
@@ -36,9 +37,9 @@ func BuildEpochNode(
 	var err error
 
 	if len(results) >= hamtThreshold {
-		blobIndexNode, err = buildHAMTBlobIndex(ctx, lsys, results)
+		blobIndexNode, err = buildHAMTBlobIndex(ctx, lsys, inp.Blobs, results)
 	} else {
-		blobIndexNode, err = buildMapBlobIndex(results)
+		blobIndexNode, err = buildMapBlobIndex(inp.Blobs, results)
 	}
 	if err != nil {
 		return types.EpochResult{}, fmt.Errorf("builder: epoch %d blob index: %w", inp.Epoch, err)
@@ -72,22 +73,35 @@ func BuildEpochNode(
 	}, nil
 }
 
-// buildMapBlobIndex builds a simple dag-cbor map: commitment → &BlobMetadata.
-// Keys are sorted for determinism.
-func buildMapBlobIndex(results []types.BlobResult) (ipld.Node, error) {
-	// Sort by commitment for determinism.
-	sorted := make([]types.BlobResult, len(results))
-	copy(sorted, results)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Commitment < sorted[j].Commitment
+// blobEntry pairs a BlobInput with its computed BlobResult for sorting.
+type blobEntry struct {
+	blob   types.BlobInput
+	result types.BlobResult
+}
+
+// blobKey returns the unique map key for a blob: "<slot>/<index>".
+// Using slot+index instead of commitment avoids duplicate-key errors when
+// the same blob data (e.g. the zero blob) appears multiple times in an epoch.
+func blobKey(b types.BlobInput) string {
+	return strconv.FormatUint(b.Slot, 10) + "/" + strconv.Itoa(b.Index)
+}
+
+// buildMapBlobIndex builds a simple dag-cbor map: "<slot>/<index>" → &BlobMetadata.
+// Keys are sorted lexicographically for determinism.
+func buildMapBlobIndex(blobs []types.BlobInput, results []types.BlobResult) (ipld.Node, error) {
+	entries := make([]blobEntry, len(blobs))
+	for i := range blobs {
+		entries[i] = blobEntry{blob: blobs[i], result: results[i]}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return blobKey(entries[i].blob) < blobKey(entries[j].blob)
 	})
 
-	n, err := qp.BuildMap(basicnode.Prototype.Map, int64(len(sorted)+1), func(ma ipld.MapAssembler) {
+	n, err := qp.BuildMap(basicnode.Prototype.Map, int64(len(entries)+1), func(ma ipld.MapAssembler) {
 		qp.MapEntry(ma, "type", qp.String("map"))
-		qp.MapEntry(ma, "blobs", qp.Map(int64(len(sorted)), func(bma ipld.MapAssembler) {
-			for _, r := range sorted {
-				metaLink := cidlink.Link{Cid: r.MetaCID}
-				qp.MapEntry(bma, r.Commitment, qp.Link(metaLink))
+		qp.MapEntry(ma, "blobs", qp.Map(int64(len(entries)), func(bma ipld.MapAssembler) {
+			for _, e := range entries {
+				qp.MapEntry(bma, blobKey(e.blob), qp.Link(cidlink.Link{Cid: e.result.MetaCID}))
 			}
 		}))
 	})
@@ -100,32 +114,29 @@ func buildMapBlobIndex(results []types.BlobResult) (ipld.Node, error) {
 // buildHAMTBlobIndex builds a HAMT-based blob index for large epochs.
 // This implementation uses a simple sharded approach compatible with
 // go-ipld-adl-hamt conventions. For production, replace with the full ADL.
-func buildHAMTBlobIndex(ctx context.Context, lsys ipld.LinkSystem, results []types.BlobResult) (ipld.Node, error) {
-	// Sort for determinism.
-	sorted := make([]types.BlobResult, len(results))
-	copy(sorted, results)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Commitment < sorted[j].Commitment
+func buildHAMTBlobIndex(ctx context.Context, lsys ipld.LinkSystem, blobs []types.BlobInput, results []types.BlobResult) (ipld.Node, error) {
+	entries := make([]blobEntry, len(blobs))
+	for i := range blobs {
+		entries[i] = blobEntry{blob: blobs[i], result: results[i]}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return blobKey(entries[i].blob) < blobKey(entries[j].blob)
 	})
 
 	// Build shards of up to 256 entries each.
 	const shardSize = 256
-	type shardEntry struct {
-		key  string
-		link cid.Cid
-	}
 
 	var shardCIDs []cid.Cid
-	for start := 0; start < len(sorted); start += shardSize {
+	for start := 0; start < len(entries); start += shardSize {
 		end := start + shardSize
-		if end > len(sorted) {
-			end = len(sorted)
+		if end > len(entries) {
+			end = len(entries)
 		}
-		shard := sorted[start:end]
+		shard := entries[start:end]
 
 		shardNode, err := qp.BuildMap(basicnode.Prototype.Map, int64(len(shard)), func(ma ipld.MapAssembler) {
-			for _, r := range shard {
-				qp.MapEntry(ma, r.Commitment, qp.Link(cidlink.Link{Cid: r.MetaCID}))
+			for _, e := range shard {
+				qp.MapEntry(ma, blobKey(e.blob), qp.Link(cidlink.Link{Cid: e.result.MetaCID}))
 			}
 		})
 		if err != nil {

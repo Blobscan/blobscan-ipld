@@ -87,8 +87,8 @@ a `blobIndex` that maps KZG commitments to `BlobMetadata` nodes.
   "blobIndex": {
     "type": "map",
     "blobs": {
-      "0xaabb...": { "/": "bafyreig7..." },
-      "0xccdd...": { "/": "bafyreih8..." }
+      "32000/0": { "/": "bafyreig7..." },
+      "32001/2": { "/": "bafyreih8..." }
     }
   }
 }
@@ -131,13 +131,14 @@ An inline dag-cbor map with two fields:
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string | Always `"map"` |
-| `blobs` | map\<string, &BlobMetadata\> | Key: KZG commitment hex string |
+| `blobs` | map\<string, &BlobMetadata\> | Key: `"<slot>/<index>"` (e.g. `"4243519/2"`) — guaranteed unique within an epoch |
 
 ```json
 {
   "type": "map",
   "blobs": {
-    "0xaabb...": { "/": "bafyreig7..." }
+    "4243518/0": { "/": "bafyreig7..." },
+    "4243519/2": { "/": "bafyreih8..." }
   }
 }
 ```
@@ -145,8 +146,8 @@ An inline dag-cbor map with two fields:
 ### HAMTIndex (≥ hamt_threshold blobs)
 
 A sharded structure for epochs with very large numbers of blobs. Blobs are
-sorted by commitment and split into shards of 256 entries each. Each shard is
-stored as a separate dag-cbor block.
+sorted by `"<slot>/<index>"` key and split into shards of 256 entries each.
+Each shard is stored as a separate dag-cbor block.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -276,14 +277,14 @@ ipfs dag get /ipns/k51q.../
 # Get a specific epoch via IPNS
 ipfs dag get /ipns/k51q.../epochs/269568
 
-# Get a specific blob's metadata via IPNS
-ipfs dag get /ipns/k51q.../epochs/269568/blobIndex/blobs/0xaabb...
+# Get a specific blob's metadata via IPNS (key = "<slot>/<index>")
+ipfs dag get /ipns/k51q.../epochs/269568/blobIndex/blobs/8626176/0
 
 # Via direct CID (stable, immutable)
-# NetworkRoot CID is returned by the generator or: SELECT cid FROM ipld_network_roots
+# NetworkRoot CID is returned by the generator or: SELECT cid FROM ipld_epochs
 ipfs dag get <NetworkRootCID>
 ipfs dag get <NetworkRootCID>/epochs/269568
-ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/0xaabb...
+ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/8626176/0
 
 # Get the raw blob bytes
 ipfs block get bafkreibm...

@@ -15,7 +15,7 @@ NetworkRoot (dag-cbor)
                          EpochNode (dag-cbor)
                          └── blobIndex
                                ├── BlobMap (dag-cbor, ≤ hamt_threshold blobs)
-                               │   └── blobs: { "<commitment>" → &BlobMetadata, … }
+                               │   └── blobs: { "<slot>/<index>" → &BlobMetadata, … }
                                └── HAMTRoot (dag-cbor, > hamt_threshold blobs)
                                    └── shards: [ &HAMTShard, … ]
                                                       │
@@ -87,13 +87,16 @@ A union type selected by the `"type"` key:
 {
   "type": "map",
   "blobs": {
-    "0x8d7a...": { "/": "bafyreie..." },
-    "0xb1c2...": { "/": "bafyreif..." }
+    "8626176/0": { "/": "bafyreie..." },
+    "8626176/1": { "/": "bafyreif..." }
   }
 }
 ```
 
-Keys are KZG commitment hex strings (`0x`-prefixed), sorted lexicographically.
+Keys are `"<slot>/<index>"` strings, sorted lexicographically. Using slot+index
+instead of commitment avoids duplicate-key errors when the same blob data (e.g.
+the zero blob) appears more than once in an epoch. The commitment is still
+available inside the linked `BlobMetadata` node.
 Values are CID links to `BlobMetadata` nodes.
 
 ### HAMTRoot (for epochs with ≥ `hamt_threshold` blobs)
@@ -109,7 +112,7 @@ Values are CID links to `BlobMetadata` nodes.
 }
 ```
 
-Each shard is a dag-cbor map of up to 256 entries: `{ commitment → &BlobMetadata }`.
+Each shard is a dag-cbor map of up to 256 entries: `{ "<slot>/<index>" → &BlobMetadata }`.
 
 ---
 
@@ -373,7 +376,7 @@ Given identical inputs, all CIDs are reproducible:
 
 - Map keys are always sorted lexicographically before encoding.
 - Epoch numbers in `NetworkRoot.epochs` are sorted numerically.
-- Blob results within an epoch are sorted by KZG commitment hex string.
+- Blob results within an epoch are sorted by `"<slot>/<index>"` key string.
 - The `raw` codec for blob data means the blob CID equals the content hash.
 
 ---
@@ -387,11 +390,11 @@ ipfs dag get <NetworkRootCID>
 # Navigate to a specific epoch
 ipfs dag get <NetworkRootCID>/epochs/269568
 
-# Get a blob's metadata by commitment
-ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/0x8d7a...
+# Get a blob's metadata by slot/index
+ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/8626176/0
 
 # Get the raw blob data CID
-ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/0x8d7a.../data
+ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/8626176/0/data
 
 # Fetch raw blob bytes
 ipfs block get <BlobCID>

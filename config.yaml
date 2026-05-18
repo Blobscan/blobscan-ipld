@@ -10,7 +10,7 @@ ipfs:
 storage:
   data_dir: "/var/lib/blobscan-ipld/mainnet"
   car_dir: "/var/lib/blobscan-ipld/mainnet/car"
-  postgres_dsn: "postgres://user:password@localhost:5432/blobscan?sslmode=disable"
+  postgres_dsn: ""  # set via POSTGRES_DSN env var or override here
 
 generator:
   hamt_threshold: 5000
