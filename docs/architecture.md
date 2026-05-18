@@ -46,11 +46,11 @@ Two files:
   for blocks before they are exported to a CAR file or uploaded to IPFS.
   The `All()` method returns a snapshot of all blocks for bulk operations.
 
-- **`linksystem.go`** — `NewLinkSystem(bs *MemBlockstore) ipld.LinkSystem`:
-  wires a `MemBlockstore` into an `ipld.LinkSystem`. The `EncoderChooser`
+- **`linksystem.go`** — `NewLinkSystem(bs blockstore.Blockstore) ipld.LinkSystem`:
+  wires any `Blockstore` into an `ipld.LinkSystem`. The `EncoderChooser`
   selects `dag-cbor` for structured nodes and a raw byte encoder for blob data.
-  The `DecoderChooser` mirrors this. All reads and writes go through the
-  `MemBlockstore`.
+  Used with `MemBlockstore` when upload is enabled, or with `NullBlockstore`
+  when `skip_upload=true` (CIDs are computed but blocks are discarded).
 
 ### `builder`
 Pure functions that construct IPLD nodes and store them via a `LinkSystem`.
@@ -115,12 +115,14 @@ Defines the `Backend` interface for progress tracking:
 type Backend interface {
     GetLastProcessedEpoch(ctx context.Context) (uint64, error)
     SetLastProcessedEpoch(ctx context.Context, epoch uint64) error
+    GetBackfillCursor(ctx context.Context) (uint64, error)
+    SetBackfillCursor(ctx context.Context, epoch uint64) error
 }
 ```
 
 Two implementations:
 - **`state.Manager`** — file-backed; reads/writes `<data_dir>/<network>-state.json` atomically via `.tmp` + `os.Rename`. Used when `postgres_dsn` is not set.
-- **`db.DBStateBackend`** — DB-backed; `GetLastProcessedEpoch` runs `SELECT MAX(epoch) FROM ipld_epochs`; `SetLastProcessedEpoch` is a no-op (the epoch row written by `SaveEpoch` is already the progress marker).
+- **`db.DBStateBackend`** — DB-backed; reads/writes cursor rows in `ipld_state` keyed by `live_<network>` and `backfill_<network>`. `GetLastProcessedEpoch` falls back to `MAX(epoch) FROM ipld_epochs` for deployments that pre-date the `ipld_state` table.
 
 ### `generator`
 The main orchestrator. Wires all packages together and runs the processing loop.
@@ -134,24 +136,22 @@ The main orchestrator. Wires all packages together and runs the processing loop.
 - `log` — structured logger (`log/slog`)
 
 **Processing flow per epoch** (inside `processEpoch`):
-1. `beacon.FetchEpochInput` — fetch all blob sidecars for the epoch
-2. `processEpochBlobs` — parallel worker pool writes raw blobs + metadata into a `MemBlockstore`
-3. `builder.BuildEpochNode` — builds the epoch DAG node
-4. `ipfs.PutBlockstore` — uploads all blocks for the epoch
-5. `db.SaveBlobs` / `db.SaveEpoch` — persist to PostgreSQL (if DB configured)
-6. `rebuildNetworkRoot` — queries all epoch CIDs from DB, rebuilds and uploads `NetworkRoot`
-7. `state.SetLastProcessedEpoch` — advance the progress marker
+1. Early return when neither IPFS upload nor DB persistence is configured.
+2. Choose blockstore: `MemBlockstore` when `ipfs != nil`; `NullBlockstore` when `skip_upload=true` (CIDs are computed but blocks are not retained in memory, reducing GC pressure during backfill).
+3. `beacon.FetchEpochInput` — fetch all blob sidecars for the epoch (skipped if blobs are already cached in the DB).
+4. `processEpochBlobs` — parallel worker pool processes blobs using the chosen `LinkSystem`.
+5. `builder.BuildEpochNode` — builds the epoch DAG node.
+6. `ipfs.PutBlockstore` — uploads all blocks for the epoch (skipped when `skip_upload=true`).
+7. `db.SaveBlobs` / `db.SaveEpoch` — persist to PostgreSQL (if DB configured).
+8. `rebuildNetworkRoot` — queries all epoch CIDs from DB, rebuilds and uploads `NetworkRoot`.
+9. `state.SetLastProcessedEpoch` — advance the progress marker.
 
 ## Concurrency model
 
-- The main poll loop runs in a single goroutine.
-- Within each epoch, blobs are processed by a pool of `generator.workers`
-  goroutines. All workers share a single `MemBlockstore` + `LinkSystem`; the
-  blockstore's `sync.RWMutex` serialises concurrent writes.
-- The push API (`serve` mode) runs on a separate HTTP server goroutine;
-  each request is handled independently with no shared mutable state.
-- State writes are serialised by the `sync.RWMutex` inside `state.Manager`
-  (file backend) or are inherently atomic as DB row writes (DB backend).
+- When DB persistence is configured, two goroutines run concurrently: the **live** goroutine polls for newly finalized epochs; the **backfill** goroutine processes historical epochs from `start_epoch` up to the live anchor. Each goroutine has its own cursor in `ipld_state`. Without a DB, a single sequential loop is used.
+- Within each epoch, blobs are processed by a pool of `generator.workers` goroutines. All workers share a single `LinkSystem`; the underlying blockstore's `sync.RWMutex` serialises concurrent writes.
+- The push API (`serve` mode) runs on a separate HTTP server goroutine; each request is handled independently with no shared mutable state.
+- State writes are serialised by the `sync.RWMutex` inside `state.Manager` (file backend) or are inherently atomic as DB row writes (DB backend).
 
 ## Error handling
 

@@ -366,14 +366,29 @@ func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uin
 // the beacon fetch and blob processing are skipped entirely.
 // p is optional batch progress context; pass nil for one-shot calls.
 func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProgress) error {
+	// Nothing to do when neither IPFS upload nor DB persistence is configured.
+	if g.ipfs == nil && g.db == nil {
+		return nil
+	}
+
 	g.log.Debug("processing epoch", "epoch", epoch)
 
 	var (
 		epochInp    types.EpochInput
 		blobResults []types.BlobResult
-		epochBS     *store.MemBlockstore
 		fromCache   bool
 	)
+
+	// Use NullBlockstore when upload is disabled — CIDs are still computed for
+	// DB storage but no blocks are retained in memory.
+	var epochBS *store.MemBlockstore
+	var lsys ipld.LinkSystem
+	if g.ipfs != nil {
+		epochBS = store.NewMemBlockstore()
+		lsys = store.NewLinkSystem(epochBS)
+	} else {
+		lsys = store.NewLinkSystem(store.NullBlockstore{})
+	}
 
 	// Check DB for blobs already processed in a previous run.
 	if g.db != nil {
@@ -388,7 +403,6 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 			if err != nil {
 				return fmt.Errorf("reconstruct epoch %d from DB: %w", epoch, err)
 			}
-			epochBS = store.NewMemBlockstore()
 			fromCache = true
 		}
 	}
@@ -413,13 +427,11 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 			"last_slot", epochInp.Slot+31,
 		)
 
-		epochBS, blobResults, err = g.processEpochBlobs(ctx, epochInp)
+		blobResults, err = g.processEpochBlobs(ctx, epochInp, lsys)
 		if err != nil {
 			return fmt.Errorf("process blobs epoch %d: %w", epoch, err)
 		}
 	}
-
-	lsys := store.NewLinkSystem(epochBS)
 
 	epochResult, err := builder.BuildEpochNode(
 		ctx, lsys, epochInp, blobResults,
@@ -441,8 +453,10 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		"blobs", len(blobResults),
 	)
 
-	if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
-		return err
+	if epochBS != nil {
+		if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
+			return err
+		}
 	}
 
 	if g.db != nil {
@@ -714,7 +728,8 @@ func (g *Generator) rebuildNetworkRoot(ctx context.Context) error {
 }
 
 // processEpochBlobs processes all blobs in an epoch concurrently using a worker pool.
-func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochInput) (*store.MemBlockstore, []types.BlobResult, error) {
+// lsys is provided by the caller; use NullBlockstore-backed lsys when upload is skipped.
+func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochInput, lsys ipld.LinkSystem) ([]types.BlobResult, error) {
 	type job struct {
 		idx  int
 		blob types.BlobInput
@@ -727,9 +742,6 @@ func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochI
 
 	jobs := make(chan job, len(epochInp.Blobs))
 	results := make(chan result, len(epochInp.Blobs))
-
-	epochBS := store.NewMemBlockstore()
-	lsys := store.NewLinkSystem(epochBS)
 
 	workers := g.cfg.Generator.Workers
 	if workers > len(epochInp.Blobs) {
@@ -761,7 +773,7 @@ func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochI
 	blobResults := make([]types.BlobResult, len(epochInp.Blobs))
 	for r := range results {
 		if r.err != nil {
-			return nil, nil, r.err
+			return nil, r.err
 		}
 		blobResults[r.idx] = r.res
 		g.log.Debug("blob processed",
@@ -774,7 +786,7 @@ func (g *Generator) processEpochBlobs(ctx context.Context, epochInp types.EpochI
 		)
 	}
 
-	return epochBS, blobResults, nil
+	return blobResults, nil
 }
 
 // ProcessSingleEpoch is a one-shot helper for backfilling or manual invocation.
