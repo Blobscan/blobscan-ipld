@@ -166,11 +166,12 @@ Convenience wrapper: calls `StoreRawBlob` then `StoreBlobMetadata`. Returns a
 `BlobResult` with both CIDs and the raw size.
 
 ### `func BuildEpochNode(ctx, lsys, inp EpochInput, results []BlobResult, network string, hamtThreshold int) (EpochResult, error)`
-Builds and stores an `EpochNode` dag-cbor node. The `blobIndex` field is:
+Builds and stores an `EpochNode` dag-cbor node. The `blobs` field is:
 - A flat `BlobMap` if `len(results) < hamtThreshold`
 - A sharded `HAMTIndex` if `len(results) >= hamtThreshold`
 
-In both cases blob commitments are sorted lexicographically before encoding.
+In both cases entries are keyed by `versionedHash` (sorted lexicographically)
+and the value is the `(slot, index)`-ordered list of `BlobMetadata` occurrences.
 
 ### `func BuildNetworkRoot(ctx, lsys, network string, epochs []EpochResult) (cid.Cid, error)`
 Builds and stores a `NetworkRoot` dag-cbor node keyed by epoch number string.

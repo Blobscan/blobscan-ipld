@@ -13,9 +13,9 @@ NetworkRoot (dag-cbor)
 └── epochs: { "269568" → &EpochNode, "269569" → &EpochNode, … }
                               │
                          EpochNode (dag-cbor)
-                         └── blobIndex
+                         └── blobs
                                ├── BlobMap (dag-cbor, ≤ hamt_threshold blobs)
-                               │   └── blobs: { "<slot>/<index>" → &BlobMetadata, … }
+                               │   └── entries: { "<versionedHash>" → [&BlobMetadata, …], … }
                                └── HAMTRoot (dag-cbor, > hamt_threshold blobs)
                                    └── shards: [ &HAMTShard, … ]
                                                       │
@@ -73,7 +73,7 @@ selectors (`/epochs/269568`).
 | `network` | `String` | Network name |
 | `approximateSizeBytes` | `Int` | Total blob data size for this epoch |
 | `blobCount` | `Int` | Number of blobs in this epoch |
-| `blobIndex` | `BlobIndex` | Inline map or HAMT link (see below) |
+| `blobs` | `BlobIndex` | versionedHash-keyed index, inline map or HAMT link (see below) |
 
 ---
 
@@ -86,18 +86,18 @@ A union type selected by the `"type"` key:
 ```json
 {
   "type": "map",
-  "blobs": {
-    "8626176/0": { "/": "bafyreie..." },
-    "8626176/1": { "/": "bafyreif..." }
+  "entries": {
+    "0x01aabb…": [ { "/": "bafyreie..." } ],
+    "0x01ccdd…": [ { "/": "bafyreif..." }, { "/": "bafyreig0..." } ]
   }
 }
 ```
 
-Keys are `"<slot>/<index>"` strings, sorted lexicographically. Using slot+index
-instead of commitment avoids duplicate-key errors when the same blob data (e.g.
-the zero blob) appears more than once in an epoch. The commitment is still
-available inside the linked `BlobMetadata` node.
-Values are CID links to `BlobMetadata` nodes.
+Keys are `versionedHash` (0x-prefixed hex) strings, sorted lexicographically.
+The value is the list of `&BlobMetadata` links for that versionedHash, ordered
+by `(slot, index)` — a list (not a single link) because the same blob data
+(e.g. the zero blob) can appear more than once in an epoch, and every
+occurrence must remain addressable. The list is length 1 in the common case.
 
 ### HAMTRoot (for epochs with ≥ `hamt_threshold` blobs)
 
@@ -112,7 +112,7 @@ Values are CID links to `BlobMetadata` nodes.
 }
 ```
 
-Each shard is a dag-cbor map of up to 256 entries: `{ "<slot>/<index>" → &BlobMetadata }`.
+Each shard is a dag-cbor map of up to 256 entries: `{ "<versionedHash>" → [&BlobMetadata, …] }`.
 
 ---
 
@@ -376,7 +376,8 @@ Given identical inputs, all CIDs are reproducible:
 
 - Map keys are always sorted lexicographically before encoding.
 - Epoch numbers in `NetworkRoot.epochs` are sorted numerically.
-- Blob results within an epoch are sorted by `"<slot>/<index>"` key string.
+- Blob index keys (versionedHash) are sorted lexicographically; the
+  occurrence list for each key is ordered by `(slot, index)`.
 - The `raw` codec for blob data means the blob CID equals the content hash.
 
 ---
@@ -390,11 +391,11 @@ ipfs dag get <NetworkRootCID>
 # Navigate to a specific epoch
 ipfs dag get <NetworkRootCID>/epochs/269568
 
-# Get a blob's metadata by slot/index
-ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/8626176/0
+# Get a blob's metadata by versionedHash ([0] = first occurrence)
+ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0
 
 # Get the raw blob data CID
-ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/8626176/0/data
+ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0/data
 
 # Fetch raw blob bytes
 ipfs block get <BlobCID>

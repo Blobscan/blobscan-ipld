@@ -60,7 +60,8 @@ ipfs dag get /ipns/k51q...
 ## EpochNode
 
 An immutable node representing one finalized Ethereum epoch (32 slots). Contains
-a `blobIndex` that maps KZG commitments to `BlobMetadata` nodes.
+a `blobs` index that maps each blob's `versionedHash` to the list of its
+`BlobMetadata` occurrences within the epoch.
 
 **Source:** `builder.BuildEpochNode` in `builder/epoch.go`
 
@@ -73,7 +74,7 @@ a `blobIndex` that maps KZG commitments to `BlobMetadata` nodes.
 | `network` | string | Network name |
 | `blobCount` | int | Total number of blobs in this epoch |
 | `approximateSizeBytes` | int | Sum of raw blob sizes in bytes |
-| `blobIndex` | BlobIndex | Inline map or HAMT shards (see below) |
+| `blobs` | BlobIndex | versionedHash-keyed index (inline map or HAMT) of BlobMetadata occurrences (see below) |
 
 ### Example
 
@@ -84,11 +85,11 @@ a `blobIndex` that maps KZG commitments to `BlobMetadata` nodes.
   "network": "mainnet",
   "blobCount": 28,
   "approximateSizeBytes": 3670016,
-  "blobIndex": {
+  "blobs": {
     "type": "map",
-    "blobs": {
-      "32000/0": { "/": "bafyreig7..." },
-      "32001/2": { "/": "bafyreih8..." }
+    "entries": {
+      "0x01aabb…": [ { "/": "bafyreig7..." } ],
+      "0x01ccdd…": [ { "/": "bafyreih8..." } ]
     }
   }
 }
@@ -120,9 +121,14 @@ ipfs pin add -r <EpochNodeCID>
 
 ## BlobIndex
 
-The `blobIndex` field inside an `EpochNode` is one of two representations
+The `blobs` field inside an `EpochNode` is one of two representations
 depending on the number of blobs in the epoch, controlled by
 `generator.hamt_threshold` (default: 5000).
+
+In both representations the entry value is a **list** of `&BlobMetadata`
+links — the occurrences of that `versionedHash` within the epoch, ordered by
+`(slot, index)`. The list is almost always length 1; it is longer only when the
+same blob data (e.g. the zero blob) appears more than once in the epoch.
 
 ### BlobMap (< hamt_threshold blobs)
 
@@ -131,22 +137,22 @@ An inline dag-cbor map with two fields:
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string | Always `"map"` |
-| `blobs` | map\<string, &BlobMetadata\> | Key: `"<slot>/<index>"` (e.g. `"4243519/2"`) — guaranteed unique within an epoch |
+| `entries` | map\<string, [&BlobMetadata]\> | Key: `versionedHash` (0x-prefixed hex), sorted lexicographically. Value: occurrence list |
 
 ```json
 {
   "type": "map",
-  "blobs": {
-    "4243518/0": { "/": "bafyreig7..." },
-    "4243519/2": { "/": "bafyreih8..." }
+  "entries": {
+    "0x01aabb…": [ { "/": "bafyreig7..." } ],
+    "0x01ccdd…": [ { "/": "bafyreih8..." }, { "/": "bafyreij9..." } ]
   }
 }
 ```
 
 ### HAMTIndex (≥ hamt_threshold blobs)
 
-A sharded structure for epochs with very large numbers of blobs. Blobs are
-sorted by `"<slot>/<index>"` key and split into shards of 256 entries each.
+A sharded structure for epochs with very large numbers of blobs. Entries are
+sorted by `versionedHash` key and split into shards of 256 entries each.
 Each shard is stored as a separate dag-cbor block.
 
 | Field | Type | Description |
@@ -155,7 +161,7 @@ Each shard is stored as a separate dag-cbor block.
 | `shardSize` | int | Entries per shard (always 256) |
 | `shards` | list\<&Shard\> | Ordered list of links to shard blocks |
 
-Each shard block is a dag-cbor map: `commitment → &BlobMetadata`.
+Each shard block is a dag-cbor map: `versionedHash → [&BlobMetadata]`.
 
 > **Note:** This is a simplified sharding scheme. For full HAMT ADL
 > compatibility, replace with `go-ipld-adl-hamt`.
@@ -237,7 +243,8 @@ type EpochNode struct {
   epoch               Int
   slot                Int
   network             String
-  blobIndex           BlobIndex
+  blobCount           Int
+  blobs               BlobIndex
   approximateSizeBytes Int
 }
 
@@ -247,8 +254,10 @@ type BlobIndex union {
 } representation keyed
 
 type BlobMap struct {
-  blobs {String : &BlobMetadata}
+  entries {String : BlobOccurrences}   # key = versionedHash
 }
+
+type BlobOccurrences [&BlobMetadata]
 
 type BlobMetadata struct {
   commitment          String
@@ -277,15 +286,16 @@ ipfs dag get /ipns/k51q.../
 # Get a specific epoch via IPNS
 ipfs dag get /ipns/k51q.../epochs/269568
 
-# Get a specific blob's metadata via IPNS (key = "<slot>/<index>")
-ipfs dag get /ipns/k51q.../epochs/269568/blobIndex/blobs/8626176/0
+# Get a blob's metadata via IPNS (key = versionedHash; [0] = first occurrence)
+ipfs dag get /ipns/k51q.../epochs/269568/blobs/entries/0x01aabb…/0
 
 # Via direct CID (stable, immutable)
 # NetworkRoot CID is returned by the generator or: SELECT cid FROM ipld_epochs
 ipfs dag get <NetworkRootCID>
 ipfs dag get <NetworkRootCID>/epochs/269568
-ipfs dag get <NetworkRootCID>/epochs/269568/blobIndex/blobs/8626176/0
+ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0
 
-# Get the raw blob bytes
+# Follow the data link to the raw blob bytes
+ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0/data
 ipfs block get bafkreibm...
 ```

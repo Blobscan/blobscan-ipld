@@ -8,7 +8,8 @@ type EpochNode struct {
   epoch               Int
   slot                Int
   network             String
-  blobIndex           BlobIndex
+  blobCount           Int
+  blobs               BlobIndex
   approximateSizeBytes Int
 }
 
@@ -19,8 +20,13 @@ type BlobIndex union {
 } representation keyed
 
 type BlobMap struct {
-  blobs {String : &BlobMetadata}   # key = blob commitment (hex)
+  entries {String : BlobOccurrences}   # key = versionedHash (0x-prefixed hex)
 }
+
+# Every BlobMetadata occurrence of one versionedHash within the epoch,
+# ordered by (slot, index). Usually length 1; longer when the same blob
+# (e.g. the zero blob) appears multiple times in the epoch.
+type BlobOccurrences [&BlobMetadata]
 
 # ─── Blob Metadata ───────────────────────────────────────────────────────────
 type BlobMetadata struct {
