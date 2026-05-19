@@ -51,12 +51,10 @@ type epochProgress struct {
 
 // New creates a new Generator from the given configuration.
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator, error) {
-	// Log startup banner
-	log.Info("\n" +
-		"╔═══════════════════════════════════════════════════════════╗\n" +
-		"║                  blobscan-ipld engine                    ║\n" +
-		"║         Building IPLD DAGs from Ethereum blobs           ║\n" +
-		"╚═══════════════════════════════════════════════════════════╝")
+	log.Info("╔═══════════════════════════════════════════════════════════╗")
+	log.Info("║                  blobscan-ipld engine                     ║")
+	log.Info("║         Building IPLD DAGs from Ethereum blobs            ║")
+	log.Info("╚═══════════════════════════════════════════════════════════╝")
 
 	var beaconClient *beacon.Client
 	if cfg.Network.BeaconRPC != "" {
