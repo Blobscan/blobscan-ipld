@@ -256,7 +256,7 @@ func (g *Generator) runLive(ctx context.Context) error {
 			g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
 			return err
 		}
-		g.log.Error("initial live tick failed", "err", err)
+		g.log.Error("initial live tick failed", "src", "live", "err", err)
 	}
 
 	for {
@@ -270,7 +270,7 @@ func (g *Generator) runLive(ctx context.Context) error {
 					g.log.Error("aborting: beacon node cannot serve blob sidecars", "err", err)
 					return err
 				}
-				g.log.Error("live tick failed", "err", err)
+				g.log.Error("live tick failed", "src", "live", "err", err)
 			}
 		}
 	}
