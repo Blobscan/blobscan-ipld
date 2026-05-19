@@ -365,8 +365,8 @@ func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uin
 			if err == nil {
 				break
 			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
 			g.log.Error("backfill epoch failed, retrying", "epoch", epoch, "err", err)
 			select {
