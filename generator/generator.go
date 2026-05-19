@@ -121,14 +121,13 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 		} else if remoteNetwork != cfg.Network.Name {
 			return nil, fmt.Errorf("generator: network mismatch: config says %q but beacon node reports %q", cfg.Network.Name, remoteNetwork)
 		} else {
-			log.Info("✓ Beacon network verified [" + remoteNetwork + "]")
-		}
-
-		if gt, err := beaconClient.GetGenesisTime(ctx); err != nil {
-			log.Warn("⚠ Could not fetch genesis time; block timestamps will be omitted", "err", err)
-		} else {
-			g.genesisTime = gt
-			log.Info("✓ Genesis time loaded", "genesis_time", gt.Format(time.RFC3339))
+			if gt, err := beaconClient.GetGenesisTime(ctx); err != nil {
+				log.Warn("⚠ Could not fetch genesis time; block timestamps will be omitted", "err", err)
+				log.Info("✓ Beacon network verified [" + remoteNetwork + "]")
+			} else {
+				g.genesisTime = gt
+				log.Info("✓ Beacon network verified ["+remoteNetwork+"]", "genesis_time", gt.Format(time.RFC3339))
+			}
 		}
 	}
 
@@ -195,8 +194,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		if err := g.state.SetLastProcessedEpoch(ctx, liveCursor); err != nil {
 			return fmt.Errorf("generator: set live cursor: %w", err)
 		}
-		g.log.Info("┌─ Parallel processing enabled\n│  ◄ live cursor anchored at: " +
-			fmt.Sprintf("%d\n│  ► backfill starting from: %d", currentFinalized, backfillStart))
+		g.log.Info("┌─ Parallel processing enabled", "live_cursor", currentFinalized, "backfill_from", backfillStart)
 	}
 
 	// Launch backfill goroutine for all epochs before the live anchor.
