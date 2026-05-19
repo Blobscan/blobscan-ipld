@@ -362,8 +362,20 @@ func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uin
 			batchStart: batchStart,
 			src:        "backfill",
 		}
-		if err := g.processEpoch(ctx, epoch, p); err != nil {
-			return fmt.Errorf("backfill: process epoch %d: %w", epoch, err)
+		for {
+			err := g.processEpoch(ctx, epoch, p)
+			if err == nil {
+				break
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			g.log.Error("backfill epoch failed, retrying", "epoch", epoch, "err", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(g.cfg.Generator.PollInterval):
+			}
 		}
 		if err := g.state.SetBackfillCursor(ctx, epoch); err != nil {
 			return fmt.Errorf("backfill: set cursor %d: %w", epoch, err)
