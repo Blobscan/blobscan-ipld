@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/blobscan/blobscan-ipld/types"
@@ -18,8 +19,13 @@ type Client struct {
 }
 
 // New creates a Client connected to the given PostgreSQL DSN and runs
-// schema migrations to ensure the required tables exist.
+// schema migrations to ensure the required tables exist. If the target
+// database does not exist it is created automatically.
 func New(ctx context.Context, dsn string) (*Client, error) {
+	if err := ensureDatabase(ctx, dsn); err != nil {
+		return nil, err
+	}
+
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("db: connect %q: %w", dsn, err)
@@ -36,6 +42,38 @@ func New(ctx context.Context, dsn string) (*Client, error) {
 // Close releases all connections in the pool.
 func (c *Client) Close() {
 	c.pool.Close()
+}
+
+// ensureDatabase connects to the "postgres" maintenance database and creates
+// the target database if it does not already exist.
+func ensureDatabase(ctx context.Context, dsn string) error {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("db: parse dsn: %w", err)
+	}
+	dbName := cfg.Database
+	cfg.Database = "postgres"
+
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("db: connect to postgres maintenance db: %w", err)
+	}
+	defer conn.Close(ctx) //nolint:errcheck
+
+	var exists bool
+	if err := conn.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("db: check database %q: %w", dbName, err)
+	}
+	if !exists {
+		if _, err := conn.Exec(ctx,
+			fmt.Sprintf("CREATE DATABASE %s", pgx.Identifier{dbName}.Sanitize()),
+		); err != nil {
+			return fmt.Errorf("db: create database %q: %w", dbName, err)
+		}
+	}
+	return nil
 }
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
