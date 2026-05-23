@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,9 +27,12 @@ type BlobscanConfig struct {
 
 // NetworkConfig identifies the Ethereum network being indexed.
 type NetworkConfig struct {
-	Name          string        `yaml:"name"`           // e.g. "mainnet", "sepolia"
-	BeaconRPC     string        `yaml:"beacon_rpc"`     // Beacon node REST API base URL (optional when using the push API)
-	BeaconTimeout time.Duration `yaml:"beacon_timeout"` // HTTP timeout for beacon requests (optional; default 60s)
+	Name              string        `yaml:"name"`                // e.g. "mainnet", "sepolia"
+	BeaconRPC         string        `yaml:"beacon_rpc"`          // Beacon node REST API base URL (optional when using the push API)
+	BeaconTimeout     time.Duration `yaml:"beacon_timeout"`      // HTTP timeout for beacon requests (optional; default 60s)
+	BeaconRateLimit   float64       `yaml:"beacon_rate_limit"`   // max requests per second to beacon RPC (optional; default 100)
+	BeaconRateBurst   int           `yaml:"beacon_rate_burst"`   // token bucket burst size (optional; default 10)
+	Beacon429Backoff  time.Duration `yaml:"beacon_429_backoff"`  // initial backoff for 429 errors (optional; default 1s)
 }
 
 // IPFSConfig holds connection settings for the IPFS node.
@@ -89,6 +93,21 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("BEACON_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			c.Network.BeaconTimeout = d
+		}
+	}
+	if v := os.Getenv("BEACON_RATE_LIMIT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Network.BeaconRateLimit = f
+		}
+	}
+	if v := os.Getenv("BEACON_RATE_BURST"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.Network.BeaconRateBurst = i
+		}
+	}
+	if v := os.Getenv("BEACON_429_BACKOFF"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Network.Beacon429Backoff = d
 		}
 	}
 	if v := os.Getenv("POSTGRES_DSN"); v != "" {
@@ -159,6 +178,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Network.BeaconTimeout == 0 {
 		c.Network.BeaconTimeout = 60 * time.Second
+	}
+	if c.Network.BeaconRateLimit == 0 {
+		c.Network.BeaconRateLimit = 100 // req/s
+	}
+	if c.Network.BeaconRateBurst == 0 {
+		c.Network.BeaconRateBurst = 10
+	}
+	if c.Network.Beacon429Backoff == 0 {
+		c.Network.Beacon429Backoff = 1 * time.Second
 	}
 	if c.Generator.StartEpoch == 0 {
 		if epoch, ok := dencunEpoch(c.Network.Name); ok {

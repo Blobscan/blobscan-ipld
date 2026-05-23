@@ -18,6 +18,9 @@ Identifies the Ethereum network being indexed.
 | `name` | string | **yes** | — | Network identifier used in node fields, file paths, and the state file name. E.g. `"mainnet"`, `"sepolia"`, `"holesky"` |
 | `beacon_rpc` | string | no | `""` | Base URL of the Beacon Node REST API. E.g. `"http://localhost:5052"`. Required for beacon-pull mode (`run` / `epoch` subcommands); not needed for the push API (`serve`) |
 | `beacon_timeout` | duration | no | `60s` | HTTP request timeout for all Beacon Node API calls |
+| `beacon_rate_limit` | float | no | `100` | Maximum requests per second to the beacon RPC. Set this to ~80-90% of your provider's limit to avoid HTTP 429 errors. E.g., use `100` for Quicknode's 125 req/s limit |
+| `beacon_rate_burst` | int | no | `10` | Token bucket burst size for rate limiting. Controls how many requests can be sent at once before backoff applies |
+| `beacon_429_backoff` | duration | no | `1s` | Initial backoff duration when a 429 (rate limit) error is received. Doubles on each consecutive 429, capped at 60s |
 
 ---
 
@@ -80,6 +83,10 @@ Controls DAG generation behaviour.
 network:
   name: mainnet
   beacon_rpc: "http://localhost:5052"
+  beacon_timeout: 60s
+  beacon_rate_limit: 100     # Adjust to ~80-90% of your RPC provider's limit
+  beacon_rate_burst: 10
+  beacon_429_backoff: 1s
 
 ipfs:
   api_addr: "/ip4/127.0.0.1/tcp/5001"
@@ -143,6 +150,10 @@ generator:
 network:
   name: sepolia
   beacon_rpc: "http://localhost:5052"
+  beacon_timeout: 60s
+  beacon_rate_limit: 100     # Adjust to ~80-90% of your RPC provider's limit
+  beacon_rate_burst: 10
+  beacon_429_backoff: 1s
 
 ipfs:
   api_addr: "/ip4/127.0.0.1/tcp/5001"
@@ -193,6 +204,9 @@ editing the YAML file. Environment variables take precedence over the file.
 | `NETWORK_NAME` | `network.name` |
 | `BEACON_RPC` | `network.beacon_rpc` |
 | `BEACON_TIMEOUT` | `network.beacon_timeout` |
+| `BEACON_RATE_LIMIT` | `network.beacon_rate_limit` |
+| `BEACON_RATE_BURST` | `network.beacon_rate_burst` |
+| `BEACON_429_BACKOFF` | `network.beacon_429_backoff` |
 | `POSTGRES_DSN` | `storage.postgres_dsn` |
 | `IPFS_API_ADDR` | `ipfs.api_addr` |
 | `IPFS_SKIP_UPLOAD` | `ipfs.skip_upload` (set to `true` or `1` to enable) |

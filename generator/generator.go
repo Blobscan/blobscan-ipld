@@ -58,7 +58,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 
 	var beaconClient *beacon.Client
 	if cfg.Network.BeaconRPC != "" {
-		beaconClient = beacon.NewClient(cfg.Network.BeaconRPC, cfg.Network.BeaconTimeout, cfg.Generator.BeaconWorkers)
+		beaconClient = beacon.NewClient(
+			cfg.Network.BeaconRPC,
+			cfg.Network.BeaconTimeout,
+			cfg.Generator.BeaconWorkers,
+			cfg.Network.BeaconRateLimit,
+			cfg.Network.BeaconRateBurst,
+			cfg.Network.Beacon429Backoff,
+		)
 	}
 
 	var ipfsClient *ipfs.Client

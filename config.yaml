@@ -1,6 +1,10 @@
 network:
   name: mainnet
   beacon_rpc: "http://localhost:5052"
+  beacon_timeout: 60s
+  beacon_rate_limit: 100  # max requests per second to beacon RPC (set to ~80-90% of provider limit to avoid 429s; e.g., 100 for Quicknode's 125 req/s limit)
+  beacon_rate_burst: 10   # token bucket burst size
+  beacon_429_backoff: 1s  # initial backoff duration for rate limit errors (doubles on each 429, capped at 60s)
 
 ipfs:
   api_addr: "/ip4/127.0.0.1/tcp/5001"

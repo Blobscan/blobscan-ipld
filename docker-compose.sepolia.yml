@@ -48,6 +48,9 @@ services:
     environment:
       NETWORK_NAME: sepolia
       BEACON_RPC: "$SEPOLIA_BEACON_RPC"
+      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      BEACON_RATE_BURST: "10"
+      BEACON_429_BACKOFF: "1s"
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_sepolia?sslmode=disable"
       IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
       IPFS_SKIP_UPLOAD: "true"
@@ -70,6 +73,9 @@ services:
     environment:
       NETWORK_NAME: hoodi
       BEACON_RPC: "$HOODI_BEACON_RPC"
+      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      BEACON_RATE_BURST: "10"
+      BEACON_429_BACKOFF: "1s"
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_hoodi?sslmode=disable"
       IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
       IPFS_SKIP_UPLOAD: "true"

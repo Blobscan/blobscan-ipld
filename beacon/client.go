@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 
 	"github.com/blobscan/blobscan-ipld/types"
 )
@@ -30,24 +31,45 @@ var ErrInsufficientCustody = errors.New(
 
 // Client is a minimal Beacon Node REST API client (Ethereum Beacon API v1).
 type Client struct {
-	base        string
-	http        *http.Client
-	slotWorkers int // parallel slot fetches inside FetchEpochInput
-	mu          sync.Mutex
-	rpcRequests int64 // counter for total RPC requests made to beacon node
+	base            string
+	http            *http.Client
+	slotWorkers     int // parallel slot fetches inside FetchEpochInput
+	limiter         *rate.Limiter
+	backoffBase     time.Duration // initial backoff for 429 errors
+	lastBackoffTime time.Time     // last time we backed off from 429
+	backoffDuration time.Duration // current backoff duration
+	mu              sync.Mutex
+	rpcRequests     int64 // counter for total RPC requests made to beacon node
 }
 
 // NewClient creates a new Beacon Node client.
 // baseURL should be the REST API base, e.g. "http://localhost:5052".
 // slotWorkers controls how many slots are fetched in parallel per epoch (default 8).
-func NewClient(baseURL string, timeout time.Duration, slotWorkers int) *Client {
+// rateLimit is requests per second (0 = unlimited).
+// rateBurst is the token bucket burst size.
+// backoff429 is the initial backoff duration for 429 (rate limit) errors.
+func NewClient(baseURL string, timeout time.Duration, slotWorkers int, rateLimit float64, rateBurst int, backoff429 time.Duration) *Client {
 	if slotWorkers <= 0 {
 		slotWorkers = 8
 	}
+	if rateBurst <= 0 {
+		rateBurst = 10
+	}
+	if backoff429 <= 0 {
+		backoff429 = 1 * time.Second
+	}
+
+	var limiter *rate.Limiter
+	if rateLimit > 0 {
+		limiter = rate.NewLimiter(rate.Limit(rateLimit), rateBurst)
+	}
+
 	return &Client{
 		base:        strings.TrimRight(baseURL, "/"),
 		http:        &http.Client{Timeout: timeout},
 		slotWorkers: slotWorkers,
+		limiter:     limiter,
+		backoffBase: backoff429,
 	}
 }
 
@@ -317,6 +339,27 @@ type ELBlobData struct {
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
 func (c *Client) get(ctx context.Context, url string, out interface{}) error {
+	// Apply backoff if we hit a 429 recently
+	c.mu.Lock()
+	if c.backoffDuration > 0 && time.Since(c.lastBackoffTime) < c.backoffDuration {
+		waitTime := c.backoffDuration - time.Since(c.lastBackoffTime)
+		c.mu.Unlock()
+		select {
+		case <-time.After(waitTime):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	} else {
+		c.mu.Unlock()
+	}
+
+	// Apply rate limiting if configured
+	if c.limiter != nil {
+		if err := c.limiter.Wait(ctx); err != nil {
+			return err
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -337,6 +380,30 @@ func (c *Client) get(ctx context.Context, url string, out interface{}) error {
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("not found (404): %s", url)
 	}
+
+	// Handle rate limiting (429) with exponential backoff
+	if resp.StatusCode == http.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		c.mu.Lock()
+		// Double the backoff duration on each 429, cap at 60s
+		if c.backoffDuration == 0 {
+			c.backoffDuration = c.backoffBase
+		} else {
+			c.backoffDuration *= 2
+			if c.backoffDuration > 60*time.Second {
+				c.backoffDuration = 60 * time.Second
+			}
+		}
+		c.lastBackoffTime = time.Now()
+		c.mu.Unlock()
+		return fmt.Errorf("HTTP 429 (rate limited): %s", body)
+	}
+
+	// Reset backoff on successful request
+	c.mu.Lock()
+	c.backoffDuration = 0
+	c.mu.Unlock()
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == http.StatusServiceUnavailable &&
