@@ -399,6 +399,51 @@ WantedBy=multi-user.target
 
 ---
 
+## Uploading historical epochs to IPFS (backfill-ipfs)
+
+If the indexer was previously run with `ipfs.skip_upload: true` (or without an
+IPFS node configured), the DB contains correct CIDs but the actual IPLD blocks
+were never uploaded to IPFS. Use the `backfill-ipfs` subcommand to recover:
+
+```bash
+# Upload all epochs stored in the DB
+./blobscan-ipld -config mainnet.yaml backfill-ipfs
+
+# Upload a specific range only
+./blobscan-ipld -config mainnet.yaml backfill-ipfs -from 269568 -to 270000
+```
+
+**Requirements:**
+- `ipfs.skip_upload` must be `false` (an IPFS node must be reachable).
+- `storage.postgres_dsn` must be set.
+- `network.beacon_rpc` must be set — blob data is re-fetched from the beacon
+  node because the raw 128 KiB bytes were never persisted locally.
+
+**How it works:**
+
+For each epoch in the range the command:
+1. Loads blob metadata (commitment, CIDs, slot, etc.) from the DB.
+2. Re-fetches the raw blob sidecars from the beacon node.
+3. Re-runs the full `ProcessBlob` pipeline to produce `DataCID` and `MetaCID`.
+4. **Compares freshly-computed CIDs against the DB values** — any mismatch is
+   logged as an error (`backfill-ipfs: DataCID mismatch` / `MetaCID mismatch`).
+   Upload continues with the newly-computed blocks and the DB is updated.
+5. Uploads all blocks (blob data, blob metadata, epoch node, HAMT if any) to IPFS.
+6. Updates the epoch row in the DB (idempotent).
+7. Rebuilds `NetworkRoot` once at the end.
+
+A single beacon RPC error on one epoch is logged and skipped; the rest of the
+run continues. Use `-log-level debug` to see per-block IPFS upload progress.
+
+**Beacon node custody window:**
+
+Standard beacon nodes only retain blob sidecars for ~18 days (4096 epochs). For
+epochs older than that, you need a beacon node configured as an archival node or
+one that fetches blob history from a provider that retains full history.
+Set the `network.beacon_rpc` to such an endpoint before running `backfill-ipfs`.
+
+---
+
 ## Backfilling historical epochs
 
 Use the `epoch` subcommand to process a single epoch and exit. This is useful for:

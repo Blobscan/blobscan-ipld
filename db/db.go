@@ -352,6 +352,18 @@ func (c *Client) GetAllEpochs(ctx context.Context, network string) ([]EpochRecor
 	return out, rows.Err()
 }
 
+// GetMaxEpoch returns the highest epoch number stored for a network, or 0 if none.
+func (c *Client) GetMaxEpoch(ctx context.Context, network string) (uint64, error) {
+	var epoch uint64
+	err := c.pool.QueryRow(ctx,
+		`SELECT COALESCE(MAX(epoch), 0) FROM ipld_epochs WHERE network = $1`, network,
+	).Scan(&epoch)
+	if err != nil {
+		return 0, fmt.Errorf("db: get max epoch: %w", err)
+	}
+	return epoch, nil
+}
+
 // GetBlobsByEpoch returns all blob records for a given epoch, ordered by blob_index.
 type BlobRecord struct {
 	Commitment    string

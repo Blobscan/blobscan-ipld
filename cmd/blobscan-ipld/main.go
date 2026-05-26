@@ -38,6 +38,7 @@ Subcommands:
   finalize-epoch   Build/update the EpochNode for an epoch whose blobs were pushed via API
   export-car       Export a CAR v2 file for a single epoch from the DB
   export-car-range Export a single CAR v2 file covering a range of epochs
+  backfill-ipfs    Re-fetch blob data from beacon and upload historical epochs to IPFS
 
 Global flags (before subcommand):
   -config <path>      Path to YAML config file (default: config.yaml)
@@ -50,6 +51,8 @@ Examples:
   blobscan-ipld -config mainnet.yaml -n 300000 finalize-epoch
   blobscan-ipld -config mainnet.yaml -n 300000 -out /tmp/300000.car export-car
   blobscan-ipld -config mainnet.yaml -from 300000 -to 300099 -out /tmp/range.car export-car-range
+  blobscan-ipld -config mainnet.yaml backfill-ipfs
+  blobscan-ipld -config mainnet.yaml backfill-ipfs -from 300000 -to 300099
 `
 
 func main() {
@@ -107,6 +110,8 @@ func main() {
 		cmdExportCAR(ctx, cfg, log, subArgs)
 	case "export-car-range":
 		cmdExportCARRange(ctx, cfg, log, subArgs)
+	case "backfill-ipfs":
+		cmdBackfillIPFS(ctx, cfg, log, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", subcommand, usage)
 		os.Exit(1)
@@ -443,6 +448,68 @@ func cmdExportCARRange(ctx context.Context, cfg *config.Config, log *slog.Logger
 		"path", path,
 		"root_cid", rangeResult.CID,
 	)
+}
+
+// backfill-ipfs: re-fetch blob data from beacon and upload all IPLD blocks to
+// IPFS for epochs that were indexed with skip_upload=true. Epochs whose CIDs
+// match the DB values are uploaded without modifying the DB; mismatching CIDs
+// are logged as errors and the DB is updated with the freshly-computed values.
+func cmdBackfillIPFS(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
+	fs := flag.NewFlagSet("backfill-ipfs", flag.ExitOnError)
+	fromEpoch := fs.Uint64("from", 0, "first epoch to backfill (default: start_epoch from config)")
+	toEpoch := fs.Uint64("to", 0, "last epoch to backfill (default: highest epoch in DB)")
+	_ = fs.Parse(args)
+
+	if cfg.Storage.PostgresDSN == "" {
+		fmt.Fprintln(os.Stderr, "backfill-ipfs: postgres_dsn is required")
+		os.Exit(1)
+	}
+	if cfg.IPFS.SkipUpload {
+		fmt.Fprintln(os.Stderr, "backfill-ipfs: ipfs.skip_upload must be false")
+		os.Exit(1)
+	}
+	if cfg.Network.BeaconRPC == "" {
+		fmt.Fprintln(os.Stderr, "backfill-ipfs: beacon_rpc is required to re-fetch blob data")
+		os.Exit(1)
+	}
+
+	gen, err := generator.New(ctx, cfg, log)
+	if err != nil {
+		log.Error("failed to create generator", "err", err)
+		os.Exit(1)
+	}
+	defer gen.Close()
+
+	from := *fromEpoch
+	if from == 0 {
+		from = cfg.Generator.StartEpoch
+	}
+
+	to := *toEpoch
+	if to == 0 {
+		// Default: process all epochs stored in the DB.
+		dbClient, err := db.New(ctx, cfg.Storage.PostgresDSN)
+		if err != nil {
+			log.Error("failed to connect to postgres", "err", err)
+			os.Exit(1)
+		}
+		maxEpoch, err := dbClient.GetMaxEpoch(ctx, cfg.Network.Name)
+		dbClient.Close()
+		if err != nil {
+			log.Error("failed to query max epoch", "err", err)
+			os.Exit(1)
+		}
+		if maxEpoch == 0 {
+			log.Info("no epochs in DB, nothing to backfill")
+			return
+		}
+		to = maxEpoch
+	}
+
+	if err := gen.BackfillIPFS(ctx, from, to); err != nil && !errors.Is(err, context.Canceled) {
+		log.Error("backfill-ipfs failed", "err", err)
+		os.Exit(1)
+	}
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

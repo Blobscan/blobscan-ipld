@@ -855,6 +855,193 @@ func (g *Generator) ProcessSingleEpoch(ctx context.Context, epoch uint64) error 
 	return nil
 }
 
+// BackfillIPFS re-fetches blob data from the beacon node for every epoch in
+// [fromEpoch, toEpoch] and uploads all IPLD blocks to IPFS.
+//
+// This is the recovery path for deployments that ran with skip_upload=true:
+// the DB already contains correct CIDs (they are deterministic hashes), but the
+// actual blocks were discarded into NullBlockstore and never reached IPFS.
+//
+// For each epoch:
+//  1. Load DB blob records (skip with a warning if none found — epoch not indexed).
+//  2. Re-fetch blob sidecars from the beacon node with real data.
+//  3. Re-run the full ProcessBlob pipeline into a fresh MemBlockstore.
+//  4. Compare newly computed CIDs against the DB values; log an error on any mismatch.
+//  5. Build the EpochNode (also freshly, so its blocks land in the MemBlockstore).
+//  6. Upload everything to IPFS and update the epoch row in the DB.
+//
+// A single beacon error on one epoch is logged and skipped rather than aborting
+// the whole run, so a transient RPC failure doesn't restart a long backfill.
+// NetworkRoot is rebuilt once at the end.
+//
+// Requires both IPFS and DB to be configured.
+func (g *Generator) BackfillIPFS(ctx context.Context, fromEpoch, toEpoch uint64) error {
+	if g.ipfs == nil {
+		return fmt.Errorf("backfill-ipfs: IPFS client is not configured (skip_upload=true?)")
+	}
+	if g.db == nil {
+		return fmt.Errorf("backfill-ipfs: DB is not configured (postgres_dsn not set)")
+	}
+	if g.beacon == nil {
+		return fmt.Errorf("backfill-ipfs: beacon_rpc is required to re-fetch blob data")
+	}
+	if toEpoch < fromEpoch {
+		return fmt.Errorf("backfill-ipfs: to_epoch (%d) must be >= from_epoch (%d)", toEpoch, fromEpoch)
+	}
+
+	total := int(toEpoch-fromEpoch) + 1
+	g.log.Info(fmt.Sprintf("⟲ IPFS backfill: %d epoch%s [%d → %d]", total, pluralize(total), fromEpoch, toEpoch))
+
+	batchStart := time.Now()
+	skipped := 0
+	uploaded := 0
+
+	for epoch := fromEpoch; epoch <= toEpoch; epoch++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		p := &epochProgress{
+			idx:        int(epoch - fromEpoch),
+			total:      total,
+			batchStart: batchStart,
+			src:        "backfill-ipfs",
+		}
+
+		// Load DB records — if none exist the epoch was never indexed; skip.
+		dbBlobs, err := g.db.GetBlobsByEpoch(ctx, epoch)
+		if err != nil {
+			return fmt.Errorf("backfill-ipfs: load blobs epoch %d: %w", epoch, err)
+		}
+		if len(dbBlobs) == 0 {
+			g.log.Warn("backfill-ipfs: no blobs in DB for epoch, skipping", "epoch", epoch)
+			continue
+		}
+
+		// Re-fetch fresh blob data from the beacon node.
+		g.logFetchingEpoch(epoch, p)
+		epochInp, err := g.beacon.FetchEpochInput(ctx, epoch, nil)
+		if err != nil {
+			g.log.Error("backfill-ipfs: beacon fetch failed, skipping epoch", "epoch", epoch, "err", err)
+			skipped++
+			continue
+		}
+
+		if len(epochInp.Blobs) == 0 {
+			g.log.Warn("backfill-ipfs: beacon returned no blobs for epoch", "epoch", epoch)
+			skipped++
+			continue
+		}
+
+		// Build blob blocks into a fresh MemBlockstore with real data.
+		epochBS := store.NewMemBlockstore()
+		lsys := store.NewLinkSystem(epochBS)
+
+		blobResults, err := g.processEpochBlobs(ctx, epochInp, lsys)
+		if err != nil {
+			g.log.Error("backfill-ipfs: blob processing failed, skipping epoch", "epoch", epoch, "err", err)
+			skipped++
+			continue
+		}
+
+		// Verify freshly-computed CIDs against DB values.
+		// Build a lookup map: commitment → DB record.
+		dbByCommitment := make(map[string]db.BlobRecord, len(dbBlobs))
+		for _, r := range dbBlobs {
+			dbByCommitment[r.Commitment] = r
+		}
+
+		cidMismatch := false
+		for i, res := range blobResults {
+			commitment := epochInp.Blobs[i].Commitment
+			dbRec, ok := dbByCommitment[commitment]
+			if !ok {
+				g.log.Error("backfill-ipfs: blob from beacon not found in DB",
+					"epoch", epoch, "commitment", commitment)
+				cidMismatch = true
+				continue
+			}
+			if res.DataCID.String() != dbRec.DataCID {
+				g.log.Error("backfill-ipfs: DataCID mismatch",
+					"epoch", epoch,
+					"commitment", commitment,
+					"db_cid", dbRec.DataCID,
+					"computed_cid", res.DataCID.String(),
+				)
+				cidMismatch = true
+			}
+			if res.MetaCID.String() != dbRec.MetaCID {
+				g.log.Error("backfill-ipfs: MetaCID mismatch",
+					"epoch", epoch,
+					"commitment", commitment,
+					"db_cid", dbRec.MetaCID,
+					"computed_cid", res.MetaCID.String(),
+				)
+				cidMismatch = true
+			}
+		}
+		if cidMismatch {
+			g.log.Warn("backfill-ipfs: CID mismatches detected — uploading freshly computed blocks (DB will be updated)",
+				"epoch", epoch)
+		}
+
+		// Build epoch node so its blocks also land in epochBS.
+		epochResult, err := builder.BuildEpochNode(
+			ctx, lsys, epochInp, blobResults,
+			g.cfg.Network.Name,
+			g.cfg.Generator.HAMTThreshold,
+		)
+		if err != nil {
+			g.log.Error("backfill-ipfs: build epoch node failed, skipping epoch", "epoch", epoch, "err", err)
+			skipped++
+			continue
+		}
+
+		var rpcCount int64
+		if g.beacon != nil {
+			rpcCount = g.beacon.GetRPCRequestCount()
+		}
+		g.log.Info(fmt.Sprintf("■ Epoch %d rebuilt [%d blobs]", epoch, len(blobResults)),
+			"cid", epochResult.CID.String(),
+			"rpc_requests", rpcCount,
+		)
+
+		// Upload all blocks (blob data + metadata + epoch node + HAMT) to IPFS.
+		if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
+			g.log.Error("backfill-ipfs: IPFS upload failed, skipping epoch", "epoch", epoch, "err", err)
+			skipped++
+			continue
+		}
+
+		// Persist/update epoch row (idempotent ON CONFLICT DO UPDATE).
+		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
+		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobResults), epochTime); err != nil {
+			return fmt.Errorf("backfill-ipfs: save epoch %d: %w", epoch, err)
+		}
+		// Only update blob rows when CIDs differed (saves unnecessary DB writes on clean runs).
+		if cidMismatch {
+			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults, g.genesisTime); err != nil {
+				return fmt.Errorf("backfill-ipfs: save blobs epoch %d: %w", epoch, err)
+			}
+		}
+
+		if err := g.state.SetBackfillCursor(ctx, epoch); err != nil {
+			return fmt.Errorf("backfill-ipfs: set cursor %d: %w", epoch, err)
+		}
+		uploaded++
+	}
+
+	g.log.Info("backfill-ipfs complete",
+		"from", fromEpoch, "to", toEpoch,
+		"uploaded", uploaded, "skipped", skipped,
+	)
+
+	if err := g.rebuildNetworkRoot(ctx); err != nil {
+		g.log.Warn("backfill-ipfs: final network root rebuild failed (non-fatal)", "err", err)
+	}
+	return nil
+}
+
 // logFetchingEpoch logs the "fetching blobs from beacon" line enriched with
 // block timestamp, indexing speed, and estimated time to finish the batch.
 func (g *Generator) logFetchingEpoch(epoch uint64, p *epochProgress) {
