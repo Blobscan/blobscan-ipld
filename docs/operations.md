@@ -399,6 +399,72 @@ WantedBy=multi-user.target
 
 ---
 
+## Summary
+
+The `summary` subcommand prints a human-readable overview of what has been
+indexed without requiring any manual SQL queries.
+
+```bash
+# Default: epoch count, blob count, data size, time range, cursors
+./blobscan-ipld -config sepolia.yaml summary
+
+# Full detail: all flags enabled
+./blobscan-ipld -config sepolia.yaml summary -gaps -top 10 -monthly -check-ipfs
+```
+
+**Example output:**
+
+```
+── blobscan-ipld summary ── sepolia ─────────────────────────────────────
+  Epochs           1,234  [132608 → 133841]  (no gaps)
+  Blobs            28,456  (avg 23.1/epoch · peak 347 in epoch 133500)
+  Data size        3.62 GiB  (avg 3.0 MiB/epoch)
+  Time             2024-01-15T12:00:00Z → 2024-03-20T14:24:00Z  (65 days)
+  Cursors          live=133841  backfill=133750
+  IPFS             use -check-ipfs to verify upload status
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `-check-ipfs` | Check each epoch node CID against the IPFS node (16 parallel workers). Reports how many epoch nodes are present and lists any missing ones (up to 10). |
+| `-gaps` | List all contiguous ranges of missing epochs within the indexed range. |
+| `-top N` | Show the N epochs with the highest blob count as a table (epoch, blobs, size, time). |
+| `-monthly` | Show a month-by-month breakdown of indexed epochs, blobs, and data size. |
+
+**`-check-ipfs` detail:**
+
+```
+  IPFS             1,231/1,234 epoch nodes present  (99.8%)
+                   missing: 132900 · 133100 · 133500
+```
+
+The check uses `block/stat` on each epoch node CID. If an epoch node is present
+its blob blocks were also uploaded in the same batch, so this is a reliable proxy
+for overall IPFS upload completeness. Use `backfill-ipfs` to recover missing epochs.
+
+**`-gaps` detail:**
+
+```
+── Epoch gaps (3 ranges · 15 epochs missing) ────────────────────────────
+  132900 → 132905  (6 epochs)
+  133100           (1 epoch)
+  133500 → 133508  (9 epochs)
+```
+
+**`-monthly` detail:**
+
+```
+── Monthly breakdown ─────────────────────────────────────────────────────
+  MONTH       EPOCHS       BLOBS       SIZE
+  2024-01        234       5,432    696 MiB
+  2024-02        310       7,210    924 MiB
+  2024-03        690      15,814   2.00 GiB
+```
+
+---
+
 ## Uploading historical epochs to IPFS (backfill-ipfs)
 
 If the indexer was previously run with `ipfs.skip_upload: true` (or without an

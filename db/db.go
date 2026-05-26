@@ -352,6 +352,196 @@ func (c *Client) GetAllEpochs(ctx context.Context, network string) ([]EpochRecor
 	return out, rows.Err()
 }
 
+// ─── Summary / analytics queries ─────────────────────────────────────────────
+
+// SummaryStats holds aggregate statistics for a network.
+type SummaryStats struct {
+	EpochCount         int64
+	FirstEpoch         uint64
+	LastEpoch          uint64
+	ExpectedEpochCount int64 // LastEpoch - FirstEpoch + 1; 0 when no epochs
+	GapCount           int64 // ExpectedEpochCount - EpochCount
+	TotalBlobs         int64
+	TotalSizeBytes     int64
+	AvgBlobsPerEpoch   float64
+	MaxBlobsPerEpoch   int64
+	MaxBlobsEpoch      uint64  // epoch with the most blobs
+	FirstEpochTime     *time.Time
+	LastEpochTime      *time.Time
+	LiveCursor         uint64
+	BackfillCursor     uint64
+}
+
+// GetSummaryStats returns aggregate statistics for the given network.
+func (c *Client) GetSummaryStats(ctx context.Context, network string) (SummaryStats, error) {
+	var s SummaryStats
+
+	// Aggregate epoch stats in a single pass.
+	err := c.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*)                                             AS epoch_count,
+			COALESCE(MIN(epoch), 0)                              AS first_epoch,
+			COALESCE(MAX(epoch), 0)                              AS last_epoch,
+			COALESCE(MAX(epoch) - MIN(epoch) + 1, 0)            AS expected_count,
+			COALESCE(SUM(blob_count), 0)                         AS total_blobs,
+			COALESCE(SUM(size_bytes), 0)                         AS total_size,
+			COALESCE(ROUND(AVG(blob_count)::numeric, 1), 0)     AS avg_blobs,
+			COALESCE(MAX(blob_count), 0)                         AS max_blobs,
+			COALESCE((SELECT epoch FROM ipld_epochs
+			           WHERE network = $1
+			           ORDER BY blob_count DESC LIMIT 1), 0)    AS max_blobs_epoch,
+			MIN(epoch_time)                                      AS first_time,
+			MAX(epoch_time)                                      AS last_time
+		FROM ipld_epochs WHERE network = $1
+	`, network).Scan(
+		&s.EpochCount,
+		&s.FirstEpoch,
+		&s.LastEpoch,
+		&s.ExpectedEpochCount,
+		&s.TotalBlobs,
+		&s.TotalSizeBytes,
+		&s.AvgBlobsPerEpoch,
+		&s.MaxBlobsPerEpoch,
+		&s.MaxBlobsEpoch,
+		&s.FirstEpochTime,
+		&s.LastEpochTime,
+	)
+	if err != nil {
+		return s, fmt.Errorf("db: summary stats: %w", err)
+	}
+	s.GapCount = s.ExpectedEpochCount - s.EpochCount
+
+	// State cursors.
+	rows, err := c.pool.Query(ctx,
+		`SELECT key, value FROM ipld_state WHERE key IN ($1, $2)`,
+		"live_"+network, "backfill_"+network,
+	)
+	if err != nil {
+		return s, fmt.Errorf("db: summary cursors: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var val uint64
+		if err := rows.Scan(&key, &val); err != nil {
+			return s, fmt.Errorf("db: summary cursor scan: %w", err)
+		}
+		switch key {
+		case "live_" + network:
+			s.LiveCursor = val
+		case "backfill_" + network:
+			s.BackfillCursor = val
+		}
+	}
+	return s, rows.Err()
+}
+
+// GapRange is a contiguous range of missing epochs [Start, End].
+type GapRange struct {
+	Start uint64
+	End   uint64
+}
+
+// Count returns the number of missing epochs in the range.
+func (g GapRange) Count() uint64 { return g.End - g.Start + 1 }
+
+// GetEpochGapRanges returns all contiguous ranges of epochs absent from the DB
+// within [MIN(epoch), MAX(epoch)] for the network, using a LEAD window function.
+func (c *Client) GetEpochGapRanges(ctx context.Context, network string) ([]GapRange, error) {
+	rows, err := c.pool.Query(ctx, `
+		SELECT epoch + 1      AS gap_start,
+		       next_epoch - 1 AS gap_end
+		FROM (
+			SELECT epoch,
+			       LEAD(epoch) OVER (ORDER BY epoch) AS next_epoch
+			FROM ipld_epochs WHERE network = $1
+		) t
+		WHERE next_epoch > epoch + 1
+		ORDER BY gap_start
+	`, network)
+	if err != nil {
+		return nil, fmt.Errorf("db: epoch gap ranges: %w", err)
+	}
+	defer rows.Close()
+
+	var out []GapRange
+	for rows.Next() {
+		var g GapRange
+		if err := rows.Scan(&g.Start, &g.End); err != nil {
+			return nil, fmt.Errorf("db: epoch gap scan: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// EpochTopRow is a lightweight view of one epoch used for top-N tables.
+type EpochTopRow struct {
+	Epoch     uint64
+	BlobCount int64
+	SizeBytes int64
+	EpochTime *time.Time
+}
+
+// GetTopEpochsByBlobCount returns the top N epochs with the highest blob counts.
+func (c *Client) GetTopEpochsByBlobCount(ctx context.Context, network string, limit int) ([]EpochTopRow, error) {
+	rows, err := c.pool.Query(ctx, `
+		SELECT epoch, blob_count, size_bytes, epoch_time
+		FROM ipld_epochs WHERE network = $1
+		ORDER BY blob_count DESC LIMIT $2
+	`, network, limit)
+	if err != nil {
+		return nil, fmt.Errorf("db: top epochs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []EpochTopRow
+	for rows.Next() {
+		var r EpochTopRow
+		if err := rows.Scan(&r.Epoch, &r.BlobCount, &r.SizeBytes, &r.EpochTime); err != nil {
+			return nil, fmt.Errorf("db: top epoch scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// MonthlyBlobStat holds per-month aggregate statistics.
+type MonthlyBlobStat struct {
+	Month      time.Time
+	EpochCount int64
+	BlobCount  int64
+	SizeBytes  int64
+}
+
+// GetMonthlyStats returns per-month blob statistics ordered by month ascending.
+// Epochs whose epoch_time is NULL are excluded.
+func (c *Client) GetMonthlyStats(ctx context.Context, network string) ([]MonthlyBlobStat, error) {
+	rows, err := c.pool.Query(ctx, `
+		SELECT DATE_TRUNC('month', epoch_time) AS month,
+		       COUNT(*)                         AS epoch_count,
+		       SUM(blob_count)                  AS blob_count,
+		       SUM(size_bytes)                  AS size_bytes
+		FROM ipld_epochs
+		WHERE network = $1 AND epoch_time IS NOT NULL
+		GROUP BY 1 ORDER BY 1
+	`, network)
+	if err != nil {
+		return nil, fmt.Errorf("db: monthly stats: %w", err)
+	}
+	defer rows.Close()
+
+	var out []MonthlyBlobStat
+	for rows.Next() {
+		var m MonthlyBlobStat
+		if err := rows.Scan(&m.Month, &m.EpochCount, &m.BlobCount, &m.SizeBytes); err != nil {
+			return nil, fmt.Errorf("db: monthly stat scan: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // GetMaxEpoch returns the highest epoch number stored for a network, or 0 if none.
 func (c *Client) GetMaxEpoch(ctx context.Context, network string) (uint64, error) {
 	var epoch uint64

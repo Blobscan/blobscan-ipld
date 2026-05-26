@@ -9,7 +9,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/blobscan/blobscan-ipld/api"
 	"github.com/blobscan/blobscan-ipld/builder"
@@ -39,6 +42,7 @@ Subcommands:
   export-car       Export a CAR v2 file for a single epoch from the DB
   export-car-range Export a single CAR v2 file covering a range of epochs
   backfill-ipfs    Re-fetch blob data from beacon and upload historical epochs to IPFS
+  summary          Show indexed-data statistics (use -help for detail flags)
 
 Global flags (before subcommand):
   -config <path>      Path to YAML config file (default: config.yaml)
@@ -53,6 +57,8 @@ Examples:
   blobscan-ipld -config mainnet.yaml -from 300000 -to 300099 -out /tmp/range.car export-car-range
   blobscan-ipld -config mainnet.yaml backfill-ipfs
   blobscan-ipld -config mainnet.yaml backfill-ipfs -from 300000 -to 300099
+  blobscan-ipld -config mainnet.yaml summary
+  blobscan-ipld -config mainnet.yaml summary -gaps -top 10 -monthly -check-ipfs
 `
 
 func main() {
@@ -112,6 +118,8 @@ func main() {
 		cmdExportCARRange(ctx, cfg, log, subArgs)
 	case "backfill-ipfs":
 		cmdBackfillIPFS(ctx, cfg, log, subArgs)
+	case "summary":
+		cmdSummary(ctx, cfg, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", subcommand, usage)
 		os.Exit(1)
@@ -509,6 +517,361 @@ func cmdBackfillIPFS(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 	if err := gen.BackfillIPFS(ctx, from, to); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("backfill-ipfs failed", "err", err)
 		os.Exit(1)
+	}
+}
+
+// summary: human-readable statistics about the indexed data.
+func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("summary", flag.ExitOnError)
+	checkIPFS := fs.Bool("check-ipfs", false, "verify epoch node CIDs are present on the IPFS node")
+	showGaps := fs.Bool("gaps", false, "list all missing epoch ranges")
+	topN := fs.Int("top", 0, "show the top N epochs by blob count")
+	monthly := fs.Bool("monthly", false, "show a month-by-month breakdown")
+	_ = fs.Parse(args)
+
+	if cfg.Storage.PostgresDSN == "" {
+		fmt.Fprintln(os.Stderr, "summary: postgres_dsn is required")
+		os.Exit(1)
+	}
+
+	dbClient, err := db.New(ctx, cfg.Storage.PostgresDSN)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "summary: connect to postgres: %v\n", err)
+		os.Exit(1)
+	}
+	defer dbClient.Close()
+
+	const sumWidth = 72
+	printSummaryHeader(cfg.Network.Name, sumWidth)
+
+	stats, err := dbClient.GetSummaryStats(ctx, cfg.Network.Name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "summary: query stats: %v\n", err)
+		os.Exit(1)
+	}
+
+	if stats.EpochCount == 0 {
+		fmt.Println("  (no epochs indexed yet)")
+		return
+	}
+
+	// Fetch gap ranges early; they're cheap and used both in the summary line
+	// and in the -gaps detail section.
+	var gaps []db.GapRange
+	if stats.GapCount > 0 {
+		gaps, err = dbClient.GetEpochGapRanges(ctx, cfg.Network.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "summary: query gaps: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// ── Default section ───────────────────────────────────────────────────────
+
+	// Epochs line.
+	epochsLine := fmt.Sprintf("%s  [%d → %d]",
+		formatCount(stats.EpochCount), stats.FirstEpoch, stats.LastEpoch)
+	if len(gaps) > 0 {
+		coveragePct := float64(stats.EpochCount) / float64(stats.ExpectedEpochCount) * 100
+		epochsLine += fmt.Sprintf("  (%d gap range%s · %s epoch%s missing · %.1f%% coverage)",
+			len(gaps), pluralS(int64(len(gaps))),
+			formatCount(stats.GapCount), pluralS(stats.GapCount),
+			coveragePct)
+	} else {
+		epochsLine += "  (no gaps)"
+	}
+	printRow("Epochs", epochsLine)
+
+	// Blobs line: total + avg + peak.
+	blobsLine := fmt.Sprintf("%s  (avg %.1f/epoch · peak %s in epoch %d)",
+		formatCount(stats.TotalBlobs),
+		stats.AvgBlobsPerEpoch,
+		formatCount(stats.MaxBlobsPerEpoch),
+		stats.MaxBlobsEpoch)
+	printRow("Blobs", blobsLine)
+
+	// Size line: total + avg per epoch.
+	avgSize := stats.TotalSizeBytes / stats.EpochCount
+	printRow("Data size", fmt.Sprintf("%s  (avg %s/epoch)",
+		formatBytes(stats.TotalSizeBytes), formatBytes(avgSize)))
+
+	// Time line.
+	if stats.FirstEpochTime != nil && stats.LastEpochTime != nil {
+		dur := formatElapsed(*stats.FirstEpochTime, *stats.LastEpochTime)
+		printRow("Time", fmt.Sprintf("%s → %s  (%s)",
+			stats.FirstEpochTime.UTC().Format("2006-01-02T15:04:05Z"),
+			stats.LastEpochTime.UTC().Format("2006-01-02T15:04:05Z"),
+			dur))
+	}
+
+	// Cursors line.
+	cursorLine := fmt.Sprintf("live=%d", stats.LiveCursor)
+	if stats.BackfillCursor > 0 {
+		cursorLine += fmt.Sprintf("  backfill=%d", stats.BackfillCursor)
+	}
+	printRow("Cursors", cursorLine)
+
+	// ── IPFS check ────────────────────────────────────────────────────────────
+	if *checkIPFS {
+		if cfg.IPFS.SkipUpload || cfg.IPFS.APIAddr == "" {
+			printRow("IPFS", "⚠ not configured (skip_upload=true or no api_addr)")
+		} else {
+			ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, false)
+			if err != nil {
+				printRow("IPFS", fmt.Sprintf("⚠ cannot connect: %v", err))
+			} else {
+				present, missingEpochs := checkEpochsInIPFS(ctx, ipfsClient, dbClient, cfg.Network.Name)
+				total := present + int64(len(missingEpochs))
+				pct := 0.0
+				if total > 0 {
+					pct = float64(present) / float64(total) * 100
+				}
+				ipfsLine := fmt.Sprintf("%s/%s epoch nodes present  (%.1f%%)",
+					formatCount(present), formatCount(total), pct)
+				if len(missingEpochs) > 0 {
+					const maxShow = 10
+					labels := make([]string, 0, min(len(missingEpochs), maxShow))
+					for _, e := range missingEpochs {
+						if len(labels) >= maxShow {
+							break
+						}
+						labels = append(labels, fmt.Sprintf("%d", e))
+					}
+					suffix := ""
+					if len(missingEpochs) > maxShow {
+						suffix = fmt.Sprintf(" … +%d more", len(missingEpochs)-maxShow)
+					}
+					ipfsLine += "\n                  missing: " + strings.Join(labels, " · ") + suffix
+				}
+				printRow("IPFS", ipfsLine)
+			}
+		}
+	} else {
+		printRow("IPFS", "use -check-ipfs to verify upload status")
+	}
+
+	// ── Gap detail ────────────────────────────────────────────────────────────
+	if *showGaps {
+		if len(gaps) == 0 {
+			printSectionHeader("Epoch gaps", "none", sumWidth)
+		} else {
+			totalMissing := int64(0)
+			for _, g := range gaps {
+				totalMissing += int64(g.Count())
+			}
+			printSectionHeader("Epoch gaps",
+				fmt.Sprintf("%d range%s · %s epoch%s missing",
+					len(gaps), pluralS(int64(len(gaps))),
+					formatCount(totalMissing), pluralS(totalMissing)),
+				sumWidth)
+			for _, g := range gaps {
+				if g.Start == g.End {
+					fmt.Printf("  %d\n", g.Start)
+				} else {
+					fmt.Printf("  %d → %d  (%s epoch%s)\n",
+						g.Start, g.End,
+						formatCount(int64(g.Count())), pluralS(int64(g.Count())))
+				}
+			}
+		}
+	}
+
+	// ── Top N epochs ──────────────────────────────────────────────────────────
+	if *topN > 0 {
+		topRows, err := dbClient.GetTopEpochsByBlobCount(ctx, cfg.Network.Name, *topN)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nsummary: query top epochs: %v\n", err)
+			os.Exit(1)
+		}
+		printSectionHeader(fmt.Sprintf("Top %d epochs by blob count", *topN), "", sumWidth)
+		fmt.Printf("  %-10s  %8s  %10s  %s\n", "EPOCH", "BLOBS", "SIZE", "TIME")
+		for _, r := range topRows {
+			timeStr := "—"
+			if r.EpochTime != nil {
+				timeStr = r.EpochTime.UTC().Format("2006-01-02T15:04:05Z")
+			}
+			fmt.Printf("  %-10d  %8s  %10s  %s\n",
+				r.Epoch,
+				formatCount(r.BlobCount),
+				formatBytes(r.SizeBytes),
+				timeStr,
+			)
+		}
+	}
+
+	// ── Monthly breakdown ─────────────────────────────────────────────────────
+	if *monthly {
+		months, err := dbClient.GetMonthlyStats(ctx, cfg.Network.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nsummary: query monthly stats: %v\n", err)
+			os.Exit(1)
+		}
+		if len(months) == 0 {
+			printSectionHeader("Monthly breakdown", "no epoch_time data available", sumWidth)
+		} else {
+			printSectionHeader("Monthly breakdown", "", sumWidth)
+			fmt.Printf("  %-10s  %8s  %10s  %10s\n", "MONTH", "EPOCHS", "BLOBS", "SIZE")
+			for _, m := range months {
+				fmt.Printf("  %-10s  %8s  %10s  %10s\n",
+					m.Month.UTC().Format("2006-01"),
+					formatCount(m.EpochCount),
+					formatCount(m.BlobCount),
+					formatBytes(m.SizeBytes),
+				)
+			}
+		}
+	}
+}
+
+// checkEpochsInIPFS checks all epoch node CIDs against the IPFS node using a
+// 16-goroutine worker pool. Returns the count of present epochs and a sorted
+// list of missing epoch numbers.
+func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *db.Client, network string) (int64, []uint64) {
+	records, err := dbClient.GetAllEpochs(ctx, network)
+	if err != nil || len(records) == 0 {
+		return 0, nil
+	}
+
+	type checkResult struct {
+		epoch   uint64
+		present bool
+	}
+
+	jobs := make(chan db.EpochRecord, len(records))
+	results := make(chan checkResult, len(records))
+
+	const workers = 16
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for rec := range jobs {
+				c, err := cid.Decode(rec.CID)
+				ok := false
+				if err == nil {
+					ok, _ = ipfsClient.HasBlock(ctx, c)
+				}
+				results <- checkResult{epoch: rec.Epoch, present: ok}
+			}
+		}()
+	}
+	for _, r := range records {
+		jobs <- r
+	}
+	close(jobs)
+	go func() { wg.Wait(); close(results) }()
+
+	var present int64
+	var missing []uint64
+	for r := range results {
+		if r.present {
+			present++
+		} else {
+			missing = append(missing, r.epoch)
+		}
+	}
+	sortUint64(missing)
+	return present, missing
+}
+
+// ── Summary formatting helpers ────────────────────────────────────────────────
+
+func printSummaryHeader(network string, width int) {
+	title := "── blobscan-ipld summary ── " + network + " "
+	pad := width - len(title)
+	if pad < 2 {
+		pad = 2
+	}
+	fmt.Println(title + strings.Repeat("─", pad))
+}
+
+func printSectionHeader(title, detail string, width int) {
+	line := "── " + title + " "
+	if detail != "" {
+		line += "(" + detail + ") "
+	}
+	pad := width - len(line)
+	if pad < 2 {
+		pad = 2
+	}
+	fmt.Println("\n" + line + strings.Repeat("─", pad))
+}
+
+func printRow(label, value string) {
+	fmt.Printf("  %-16s %s\n", label, value)
+}
+
+// formatBytes formats a byte count as a human-readable string (GiB/MiB/KiB/B).
+func formatBytes(n int64) string {
+	const (
+		gib = 1 << 30
+		mib = 1 << 20
+		kib = 1 << 10
+	)
+	switch {
+	case n >= gib:
+		return fmt.Sprintf("%.2f GiB", float64(n)/gib)
+	case n >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(n)/mib)
+	case n >= kib:
+		return fmt.Sprintf("%.1f KiB", float64(n)/kib)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// formatCount formats an integer with comma thousands separators.
+func formatCount(n int64) string {
+	if n < 0 {
+		return "-" + formatCount(-n)
+	}
+	s := fmt.Sprintf("%d", n)
+	out := make([]byte, 0, len(s)+(len(s)-1)/3)
+	for i, ch := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, byte(ch))
+	}
+	return string(out)
+}
+
+// formatElapsed returns a human-readable duration between two times.
+func formatElapsed(a, b time.Time) string {
+	d := b.Sub(a)
+	if d < 0 {
+		d = -d
+	}
+	days := int(d.Hours() / 24)
+	switch {
+	case days >= 2:
+		return fmt.Sprintf("%d days", days)
+	case days == 1:
+		return "1 day"
+	default:
+		h := int(d.Hours())
+		if h >= 1 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+}
+
+// pluralS returns "s" when n != 1, "" otherwise.
+func pluralS(n int64) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// sortUint64 sorts a uint64 slice in ascending order.
+func sortUint64(a []uint64) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j] < a[j-1]; j-- {
+			a[j], a[j-1] = a[j-1], a[j]
+		}
 	}
 }
 
