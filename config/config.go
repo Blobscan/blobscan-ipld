@@ -37,10 +37,11 @@ type NetworkConfig struct {
 
 // IPFSConfig holds connection settings for the IPFS node.
 type IPFSConfig struct {
-	APIAddr    string        `yaml:"api_addr"`    // e.g. "/ip4/127.0.0.1/tcp/5001"
-	PinOnAdd   bool          `yaml:"pin_on_add"`
-	Timeout    time.Duration `yaml:"timeout"`
-	SkipUpload bool          `yaml:"skip_upload"` // compute CIDs only; do not connect to or upload to IPFS
+	APIAddr       string        `yaml:"api_addr"`       // e.g. "/ip4/127.0.0.1/tcp/5001"
+	PinOnAdd      bool          `yaml:"pin_on_add"`
+	Timeout       time.Duration `yaml:"timeout"`
+	SkipUpload    bool          `yaml:"skip_upload"`    // compute CIDs only; do not connect to or upload to IPFS
+	UploadWorkers int           `yaml:"upload_workers"` // parallel block uploads in PutBlockstore (default 16)
 }
 
 // StorageConfig controls local storage paths and the database connection.
@@ -119,6 +120,11 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("IPFS_SKIP_UPLOAD"); v == "true" || v == "1" {
 		c.IPFS.SkipUpload = true
 	}
+	if v := os.Getenv("IPFS_UPLOAD_WORKERS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.IPFS.UploadWorkers = i
+		}
+	}
 	if v := os.Getenv("BLOBSCAN_API_URL"); v != "" {
 		c.Blobscan.APIURL = v
 	}
@@ -175,6 +181,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.IPFS.Timeout == 0 {
 		c.IPFS.Timeout = 30 * time.Second
+	}
+	if c.IPFS.UploadWorkers == 0 {
+		c.IPFS.UploadWorkers = 16
 	}
 	if c.Network.BeaconTimeout == 0 {
 		c.Network.BeaconTimeout = 60 * time.Second

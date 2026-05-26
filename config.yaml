@@ -11,6 +11,7 @@ ipfs:
   pin_on_add: true
   timeout: 30s
   skip_upload: false  # set to true (or IPFS_SKIP_UPLOAD=true) to compute CIDs without uploading; api_addr not required in that mode
+  upload_workers: 16  # parallel block uploads per epoch (or IPFS_UPLOAD_WORKERS=N); raise for remote IPFS, lower if the local daemon saturates
 
 storage:
   data_dir: "/var/lib/blobscan-ipld/mainnet"

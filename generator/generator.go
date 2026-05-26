@@ -71,7 +71,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 	var ipfsClient *ipfs.Client
 	if !cfg.IPFS.SkipUpload {
 		var err error
-		ipfsClient, err = ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, cfg.IPFS.PinOnAdd)
+		ipfsClient, err = ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, cfg.IPFS.PinOnAdd, cfg.IPFS.UploadWorkers)
 		if err != nil {
 			return nil, fmt.Errorf("generator: create ipfs client: %w", err)
 		}

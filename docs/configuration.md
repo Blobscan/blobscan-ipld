@@ -34,6 +34,7 @@ Connection settings for the IPFS node (Kubo-compatible).
 | `pin_on_add` | bool | no | `false` | If `true`, recursively pins each epoch CID after uploading its blocks |
 | `timeout` | duration | no | `30s` | HTTP request timeout for all IPFS API calls |
 | `skip_upload` | bool | no | `false` | If `true`, skip all IPFS interaction. CIDs are still computed deterministically and saved to the database. Useful for DB-only indexing without running an IPFS node. When set, `api_addr` is not required |
+| `upload_workers` | int | no | `16` | Number of parallel `block/put` requests per epoch. The HTTP transport sizes its keepalive pool to match, so increasing this fans uploads out across many connections. Lower if the local IPFS daemon saturates; raise for high-latency remote IPFS endpoints. Override via env `IPFS_UPLOAD_WORKERS=N` |
 
 ---
 
@@ -210,6 +211,7 @@ editing the YAML file. Environment variables take precedence over the file.
 | `POSTGRES_DSN` | `storage.postgres_dsn` |
 | `IPFS_API_ADDR` | `ipfs.api_addr` |
 | `IPFS_SKIP_UPLOAD` | `ipfs.skip_upload` (set to `true` or `1` to enable) |
+| `IPFS_UPLOAD_WORKERS` | `ipfs.upload_workers` |
 
 This is the mechanism used by the Docker Compose files — a single `config.yaml`
 is shared across networks and the per-deployment values are injected via the

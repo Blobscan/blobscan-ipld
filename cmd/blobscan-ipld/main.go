@@ -616,7 +616,7 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 		if cfg.IPFS.SkipUpload || cfg.IPFS.APIAddr == "" {
 			printRow("IPFS", "⚠ not configured (skip_upload=true or no api_addr)")
 		} else {
-			ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, false)
+			ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, false, cfg.IPFS.UploadWorkers)
 			if err != nil {
 				printRow("IPFS", fmt.Sprintf("⚠ cannot connect: %v", err))
 			} else {
@@ -878,7 +878,7 @@ func sortUint64(a []uint64) {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func newIPFSClientFromConfig(cfg *config.Config) (*ipfs.Client, error) {
-	return ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, cfg.IPFS.PinOnAdd)
+	return ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, cfg.IPFS.PinOnAdd, cfg.IPFS.UploadWorkers)
 }
 
 func newLogger(level string) *slog.Logger {

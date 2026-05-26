@@ -10,35 +10,66 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/blobscan/blobscan-ipld/store"
 )
 
 // Client is a minimal Kubo HTTP RPC client.
 type Client struct {
-	base     string // e.g. "http://127.0.0.1:5001"
-	http     *http.Client
-	timeout  time.Duration
-	pinOnAdd bool
+	base          string // e.g. "http://127.0.0.1:5001"
+	http          *http.Client
+	timeout       time.Duration
+	pinOnAdd      bool
+	uploadWorkers int
 }
 
 // NewClient creates a new IPFS HTTP RPC client.
 // apiAddr should be a multiaddr string like "/ip4/127.0.0.1/tcp/5001" or a
 // plain HTTP URL like "http://127.0.0.1:5001".
-func NewClient(apiAddr string, timeout time.Duration, pinOnAdd bool) (*Client, error) {
+//
+// uploadWorkers controls the fan-out of PutBlockstore (parallel block uploads).
+// If uploadWorkers <= 0, it defaults to 1 (serial uploads, legacy behavior).
+// The underlying http.Transport is sized to keep that many keepalive
+// connections open per host so that uploads actually run in parallel rather
+// than being serialized by Go's default MaxIdleConnsPerHost=2.
+func NewClient(apiAddr string, timeout time.Duration, pinOnAdd bool, uploadWorkers int) (*Client, error) {
 	base := normalizeAddr(apiAddr)
+	if uploadWorkers <= 0 {
+		uploadWorkers = 1
+	}
+
+	maxConns := uploadWorkers * 2
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          maxConns,
+		MaxIdleConnsPerHost:   maxConns,
+		MaxConnsPerHost:       maxConns,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	return &Client{
-		base:     base,
-		http:     &http.Client{Timeout: timeout},
-		timeout:  timeout,
-		pinOnAdd: pinOnAdd,
+		base:          base,
+		http:          &http.Client{Timeout: timeout, Transport: transport},
+		timeout:       timeout,
+		pinOnAdd:      pinOnAdd,
+		uploadWorkers: uploadWorkers,
 	}, nil
 }
 
@@ -120,22 +151,57 @@ type ProgressFunc func(current, total int, blockCID string)
 
 // PutBlockstore uploads all blocks from a MemBlockstore to the IPFS node.
 // block/put is idempotent on Kubo — uploading an already-present block is a no-op.
-// An optional ProgressFunc is called after each block is processed.
+// Uploads are fanned out across c.uploadWorkers goroutines; on the first error
+// remaining uploads are cancelled and the error is returned.
+// An optional ProgressFunc is called after each block is processed; for parallel
+// uploads the (current, total) counter is monotonic but block order is not the
+// blockstore order.
 func (c *Client) PutBlockstore(ctx context.Context, bs *store.MemBlockstore, progress ...ProgressFunc) error {
 	blks := bs.All()
+	total := len(blks)
+	if total == 0 {
+		return nil
+	}
+
 	var fn ProgressFunc
 	if len(progress) > 0 {
 		fn = progress[0]
 	}
-	for i, blk := range blks {
-		if err := c.PutBlock(ctx, blk); err != nil {
-			return fmt.Errorf("ipfs: put block %d/%d (%s): %w", i+1, len(blks), blk.Cid(), err)
-		}
-		if fn != nil {
-			fn(i+1, len(blks), blk.Cid().String())
-		}
+
+	workers := c.uploadWorkers
+	if workers <= 0 {
+		workers = 1
 	}
-	return nil
+	if workers > total {
+		workers = total
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+
+	var (
+		mu   sync.Mutex
+		done int
+	)
+
+	for i, blk := range blks {
+		i, blk := i, blk
+		g.Go(func() error {
+			if err := c.PutBlock(gctx, blk); err != nil {
+				return fmt.Errorf("ipfs: put block %d/%d (%s): %w", i+1, total, blk.Cid(), err)
+			}
+			if fn != nil {
+				mu.Lock()
+				done++
+				cur := done
+				mu.Unlock()
+				fn(cur, total, blk.Cid().String())
+			}
+			return nil
+		})
+	}
+
+	return g.Wait()
 }
 
 // GetBlock fetches a single raw block from the IPFS node using /api/v0/block/get.
