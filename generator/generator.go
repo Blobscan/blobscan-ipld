@@ -336,55 +336,40 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 // runBackfill processes epochs from startEpoch to targetEpoch (inclusive),
 // skipping any epoch already saved in the DB. It updates the backfill cursor
 // after each epoch and rebuilds the NetworkRoot once at completion.
+//
+// Internally a two-stage pipeline overlaps the beacon fetch + CID build of
+// epoch N+1 with the IPFS upload + DB persist of epoch N. Strict ordering is
+// preserved by a single buffered channel and a single-threaded consumer, so
+// SetBackfillCursor still advances monotonically and crash recovery semantics
+// match the pre-pipeline behaviour. On any error, the pipeline is torn down,
+// we sleep one PollInterval, and the outer retry loop resumes from the latest
+// cursor.
 func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uint64) error {
 	total := int(targetEpoch-startEpoch) + 1
 	g.log.Info(fmt.Sprintf("⟲ Backfill: %d epochs [%d → %d]", total, startEpoch, targetEpoch))
 
 	batchStart := time.Now()
-	for epoch := startEpoch; epoch <= targetEpoch; epoch++ {
+	next := startEpoch
+	for next <= targetEpoch {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Skip epochs already fully saved (e.g. processed by a previous run or
-		// by the live goroutine).
-		if g.db != nil {
-			exists, err := g.db.EpochExists(ctx, epoch)
-			if err != nil {
-				return fmt.Errorf("backfill: check epoch %d: %w", epoch, err)
-			}
-			if exists {
-				if err := g.state.SetBackfillCursor(ctx, epoch); err != nil {
-					return fmt.Errorf("backfill: set cursor %d: %w", epoch, err)
-				}
-				continue
-			}
+		resumed, err := g.runBackfillPipeline(ctx, next, targetEpoch, startEpoch, total, batchStart)
+		if err == nil {
+			next = resumed
+			break
 		}
-
-		p := &epochProgress{
-			idx:        int(epoch - startEpoch),
-			total:      total,
-			batchStart: batchStart,
-			src:        "backfill",
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		for {
-			err := g.processEpoch(ctx, epoch, p)
-			if err == nil {
-				break
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			g.log.Error("backfill epoch failed, retrying", "epoch", epoch, "err", err)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(g.cfg.Generator.PollInterval):
-			}
+		g.log.Error("backfill pipeline failed, retrying", "from", next, "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(g.cfg.Generator.PollInterval):
 		}
-		if err := g.state.SetBackfillCursor(ctx, epoch); err != nil {
-			return fmt.Errorf("backfill: set cursor %d: %w", epoch, err)
-		}
+		next = resumed // resumed reflects the last successfully persisted epoch + 1
 	}
 
 	g.log.Info("backfill complete", "from", startEpoch, "to", targetEpoch)
@@ -394,18 +379,140 @@ func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uin
 	return nil
 }
 
-// processEpoch handles a single finalized epoch end-to-end (beacon-pull mode):
-// fetch → build blobs → build epoch node → upload IPFS → rebuild NetworkRoot → save DB.
-// If blobs for this epoch already exist in the DB (e.g. from a previous interrupted run),
-// the beacon fetch and blob processing are skipped entirely.
-// p is optional batch progress context; pass nil for one-shot calls.
-func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProgress) error {
-	// Nothing to do when neither IPFS upload nor DB persistence is configured.
-	if g.ipfs == nil && g.db == nil {
-		return nil
+// runBackfillPipeline runs one attempt of the producer/consumer pipeline. It
+// returns (lastEpochProcessed+1, nil) on full completion or (resumePoint, err)
+// on failure so the caller can retry from where the consumer last advanced
+// the cursor.
+func (g *Generator) runBackfillPipeline(
+	ctx context.Context,
+	from, targetEpoch, startEpoch uint64,
+	total int,
+	batchStart time.Time,
+) (uint64, error) {
+	type job struct {
+		epoch uint64
+		be    builtEpoch
+		err   error
 	}
 
-	g.log.Debug("processing epoch", "epoch", epoch)
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Buffer of 2 is enough to hide upload+DB latency behind the next fetch
+	// without letting the producer race far ahead and waste work if the
+	// consumer errors.
+	pending := make(chan job, 2)
+
+	// Track the last epoch the consumer successfully persisted (or skipped via
+	// EpochExists), so on error we can resume from the right place.
+	var nextResume uint64 = from
+
+	// Producer: build epochs in order and push them onto `pending`.
+	producerDone := make(chan error, 1)
+	go func() {
+		defer close(pending)
+		for epoch := from; epoch <= targetEpoch; epoch++ {
+			if pctx.Err() != nil {
+				producerDone <- pctx.Err()
+				return
+			}
+
+			// Skip epochs already saved in the DB. The consumer still advances
+			// the cursor for these via the job channel so ordering is preserved.
+			if g.db != nil {
+				exists, err := g.db.EpochExists(pctx, epoch)
+				if err != nil {
+					producerDone <- fmt.Errorf("backfill: check epoch %d: %w", epoch, err)
+					return
+				}
+				if exists {
+					select {
+					case pending <- job{epoch: epoch, be: builtEpoch{epoch: epoch, empty: true}}:
+					case <-pctx.Done():
+						producerDone <- pctx.Err()
+						return
+					}
+					continue
+				}
+			}
+
+			p := &epochProgress{
+				idx:        int(epoch - startEpoch),
+				total:      total,
+				batchStart: batchStart,
+				src:        "backfill",
+			}
+			be, err := g.buildEpoch(pctx, epoch, p)
+			if err != nil {
+				select {
+				case pending <- job{epoch: epoch, err: err}:
+				case <-pctx.Done():
+				}
+				producerDone <- nil
+				return
+			}
+			select {
+			case pending <- job{epoch: epoch, be: be}:
+			case <-pctx.Done():
+				producerDone <- pctx.Err()
+				return
+			}
+		}
+		producerDone <- nil
+	}()
+
+	// Consumer: persist epochs in order, advance the cursor.
+	for j := range pending {
+		if j.err != nil {
+			cancel()
+			// Drain so the producer goroutine can exit.
+			for range pending {
+			}
+			<-producerDone
+			return nextResume, j.err
+		}
+		if err := g.persistEpoch(pctx, j.be); err != nil {
+			cancel()
+			for range pending {
+			}
+			<-producerDone
+			return nextResume, fmt.Errorf("backfill: persist epoch %d: %w", j.epoch, err)
+		}
+		if err := g.state.SetBackfillCursor(pctx, j.epoch); err != nil {
+			cancel()
+			for range pending {
+			}
+			<-producerDone
+			return nextResume, fmt.Errorf("backfill: set cursor %d: %w", j.epoch, err)
+		}
+		nextResume = j.epoch + 1
+	}
+
+	if err := <-producerDone; err != nil {
+		return nextResume, err
+	}
+	return nextResume, nil
+}
+
+// builtEpoch carries the fetch+build output of one epoch across the pipeline
+// boundary. epochBS is nil when IPFS upload is disabled; empty (Blobs == 0)
+// epochs are signalled with the empty sentinel and skipped by persistEpoch.
+type builtEpoch struct {
+	epoch       uint64
+	epochInp    types.EpochInput
+	blobResults []types.BlobResult
+	epochResult types.EpochResult
+	epochBS     *store.MemBlockstore
+	fromCache   bool
+	empty       bool // epoch had no blobs; nothing to persist
+}
+
+// buildEpoch performs the CPU + beacon-bound stage of processing one epoch:
+// DB-cache check → beacon fetch → blob processing → BuildEpochNode. It does
+// not touch IPFS or write the DB. Returns a builtEpoch ready to be persisted
+// or, when the epoch has no blobs, one with empty=true.
+func (g *Generator) buildEpoch(ctx context.Context, epoch uint64, p *epochProgress) (builtEpoch, error) {
+	out := builtEpoch{epoch: epoch}
 
 	var (
 		epochInp    types.EpochInput
@@ -413,8 +520,6 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		fromCache   bool
 	)
 
-	// Use NullBlockstore when upload is disabled — CIDs are still computed for
-	// DB storage but no blocks are retained in memory.
 	var epochBS *store.MemBlockstore
 	var lsys ipld.LinkSystem
 	if g.ipfs != nil {
@@ -424,18 +529,17 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		lsys = store.NewLinkSystem(store.NullBlockstore{})
 	}
 
-	// Check DB for blobs already processed in a previous run.
 	if g.db != nil {
 		cached, err := g.db.GetBlobsByEpoch(ctx, epoch)
 		if err != nil {
-			return fmt.Errorf("check cached blobs epoch %d: %w", epoch, err)
+			return out, fmt.Errorf("check cached blobs epoch %d: %w", epoch, err)
 		}
 		if len(cached) > 0 {
 			g.log.Debug("using cached blobs from DB, skipping beacon fetch",
 				"epoch", epoch, "blobs", len(cached))
 			epochInp, blobResults, err = g.reconstructFromDB(epoch, cached)
 			if err != nil {
-				return fmt.Errorf("reconstruct epoch %d from DB: %w", epoch, err)
+				return out, fmt.Errorf("reconstruct epoch %d from DB: %w", epoch, err)
 			}
 			fromCache = true
 		}
@@ -446,12 +550,13 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		var err error
 		epochInp, err = g.beacon.FetchEpochInput(ctx, epoch, nil)
 		if err != nil {
-			return fmt.Errorf("fetch epoch %d: %w", epoch, err)
+			return out, fmt.Errorf("fetch epoch %d: %w", epoch, err)
 		}
 
 		if len(epochInp.Blobs) == 0 {
 			g.log.Info("epoch has no blobs, skipping", "epoch", epoch)
-			return nil
+			out.empty = true
+			return out, nil
 		}
 
 		g.log.Debug("blobs fetched from beacon",
@@ -463,7 +568,7 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 
 		blobResults, err = g.processEpochBlobs(ctx, epochInp, lsys)
 		if err != nil {
-			return fmt.Errorf("process blobs epoch %d: %w", epoch, err)
+			return out, fmt.Errorf("process blobs epoch %d: %w", epoch, err)
 		}
 	}
 
@@ -473,16 +578,15 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		g.cfg.Generator.HAMTThreshold,
 	)
 	if err != nil {
-		return fmt.Errorf("build epoch node %d: %w", epoch, err)
+		return out, fmt.Errorf("build epoch node %d: %w", epoch, err)
 	}
 
-	src := ""
 	srcIcon := "◆"
 	if p != nil {
-		src = p.src
-		if src == "live" {
+		switch p.src {
+		case "live":
 			srcIcon = "●"
-		} else if src == "backfill" {
+		case "backfill":
 			srcIcon = "■"
 		}
 	}
@@ -494,31 +598,61 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 		"cid", epochResult.CID.String(),
 		"rpc_requests", rpcCount)
 
-	if epochBS != nil {
-		if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
+	out.epochInp = epochInp
+	out.blobResults = blobResults
+	out.epochResult = epochResult
+	out.epochBS = epochBS
+	out.fromCache = fromCache
+	return out, nil
+}
+
+// persistEpoch performs the I/O-bound stage: IPFS upload → DB save → notifier.
+// It is safe to call concurrently with another epoch's buildEpoch as long as
+// callers serialize persistEpoch invocations to preserve cursor monotonicity.
+func (g *Generator) persistEpoch(ctx context.Context, be builtEpoch) error {
+	if be.empty {
+		return nil
+	}
+	if be.epochBS != nil {
+		if err := g.uploadAndPin(ctx, be.epochBS, be.epochResult.CID, be.epoch); err != nil {
 			return err
 		}
 	}
 
 	if g.db != nil {
-		g.log.Debug("saving to database", "epoch", epoch, "blobs", len(blobResults))
-		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
-		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobResults), epochTime); err != nil {
-			return fmt.Errorf("save epoch %d to db: %w", epoch, err)
+		g.log.Debug("saving to database", "epoch", be.epoch, "blobs", len(be.blobResults))
+		epochTime := beacon.SlotTime(g.genesisTime, be.epoch*32)
+		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, be.epochResult, len(be.blobResults), epochTime); err != nil {
+			return fmt.Errorf("save epoch %d to db: %w", be.epoch, err)
 		}
-		if !fromCache {
-			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults, g.genesisTime); err != nil {
-				return fmt.Errorf("save blobs epoch %d to db: %w", epoch, err)
+		if !be.fromCache {
+			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, be.epoch, be.epochInp.Blobs, be.blobResults, g.genesisTime); err != nil {
+				return fmt.Errorf("save blobs epoch %d to db: %w", be.epoch, err)
 			}
 		}
 	}
 
-	if !fromCache {
-		g.notifier.NotifyBlobs(ctx, buildReferences(epochInp.Blobs, blobResults))
+	if !be.fromCache {
+		g.notifier.NotifyBlobs(ctx, buildReferences(be.epochInp.Blobs, be.blobResults))
 	}
 
-	g.log.Debug("epoch complete", "epoch", epoch)
+	g.log.Debug("epoch complete", "epoch", be.epoch)
 	return nil
+}
+
+// processEpoch is the sequential (non-pipelined) helper used by live mode and
+// single-epoch CLI commands. The backfill loop uses buildEpoch + persistEpoch
+// directly to overlap fetch(N+1) with persist(N).
+func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProgress) error {
+	if g.ipfs == nil && g.db == nil {
+		return nil
+	}
+	g.log.Debug("processing epoch", "epoch", epoch)
+	be, err := g.buildEpoch(ctx, epoch, p)
+	if err != nil {
+		return err
+	}
+	return g.persistEpoch(ctx, be)
 }
 
 // reconstructFromDB rebuilds EpochInput and BlobResult slices from DB records,
