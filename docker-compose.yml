@@ -31,7 +31,7 @@ services:
       timeout: 5s
       retries: 5
 
-  blobscan-ipld:
+  ethereum:
     build: .
     restart: unless-stopped
     depends_on:
@@ -41,8 +41,8 @@ services:
         condition: service_healthy
     volumes:
       - ./config.yaml:/etc/blobscan-ipld/config.yaml:ro
-      - blobscan_data:/data
-      - blobscan_car:/car
+      - ipld_ethereum_data:/data
+      - ipld_ethereum_car:/car
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -58,5 +58,5 @@ services:
 volumes:
   postgres_data:
   ipfs_data:
-  blobscan_data:
-  blobscan_car:
+  ipld_ethereum_data:
+  ipld_ethereum_car:
