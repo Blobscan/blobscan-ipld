@@ -175,13 +175,27 @@ func (c *Client) SaveEpoch(ctx context.Context, network string, result types.Epo
 	return nil
 }
 
+// blobsCopyColumns is the column order used by SaveBlobs' CopyFrom.
+var blobsCopyColumns = []string{
+	"commitment", "epoch", "slot", "slot_time", "network", "blob_index",
+	"data_cid", "meta_cid", "versioned_hash", "tx_hash", "block_number",
+	"block_hash", "size_bytes",
+}
+
 // SaveBlobs inserts or updates one row per blob in ipld_blobs.
 // genesisTime is used to compute each blob's slot_time; pass a zero time when
 // genesis time is unavailable (slot_time stored as NULL).
 // It is idempotent: re-processing the same commitment overwrites the previous row.
+//
+// Rows are bulk-loaded into a per-tx temp staging table via pgx's binary
+// CopyFrom path and then upserted into ipld_blobs with a single INSERT/SELECT,
+// turning ~N round-trips into 2 for an epoch with N blobs.
 func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, blobs []types.BlobInput, results []types.BlobResult, genesisTime time.Time) error {
 	if len(blobs) != len(results) {
 		return fmt.Errorf("db: SaveBlobs: blobs/results length mismatch (%d vs %d)", len(blobs), len(results))
+	}
+	if len(blobs) == 0 {
+		return nil
 	}
 
 	tx, err := c.pool.Begin(ctx)
@@ -190,6 +204,29 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	// Temp table mirrors ipld_blobs' column set (excluding created_at, which
+	// defaults to NOW() on the upsert into the real table).
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE ipld_blobs_stage (
+			commitment     TEXT        NOT NULL,
+			epoch          BIGINT      NOT NULL,
+			slot           BIGINT      NOT NULL,
+			slot_time      TIMESTAMPTZ,
+			network        TEXT        NOT NULL,
+			blob_index     INT         NOT NULL,
+			data_cid       TEXT        NOT NULL,
+			meta_cid       TEXT        NOT NULL,
+			versioned_hash TEXT        NOT NULL,
+			tx_hash        TEXT        NOT NULL,
+			block_number   BIGINT      NOT NULL,
+			block_hash     TEXT        NOT NULL,
+			size_bytes     BIGINT      NOT NULL
+		) ON COMMIT DROP
+	`); err != nil {
+		return fmt.Errorf("db: create stage table epoch %d: %w", epoch, err)
+	}
+
+	rows := make([][]any, len(blobs))
 	for i, inp := range blobs {
 		res := results[i]
 		var slotTime *time.Time
@@ -197,24 +234,10 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 			t := genesisTime.Add(time.Duration(inp.Slot) * 12 * time.Second)
 			slotTime = &t
 		}
-		_, err := tx.Exec(ctx, `
-			INSERT INTO ipld_blobs
-				(commitment, epoch, slot, slot_time, network, blob_index, data_cid, meta_cid,
-				 versioned_hash, tx_hash, block_number, block_hash, size_bytes)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-			ON CONFLICT (commitment) DO UPDATE SET
-				slot_time      = EXCLUDED.slot_time,
-				data_cid       = EXCLUDED.data_cid,
-				meta_cid       = EXCLUDED.meta_cid,
-				versioned_hash = EXCLUDED.versioned_hash,
-				tx_hash        = EXCLUDED.tx_hash,
-				block_number   = EXCLUDED.block_number,
-				block_hash     = EXCLUDED.block_hash,
-				created_at     = NOW()
-		`,
+		rows[i] = []any{
 			inp.Commitment,
-			epoch,
-			inp.Slot,
+			int64(epoch),
+			int64(inp.Slot),
 			slotTime,
 			network,
 			inp.Index,
@@ -222,13 +245,38 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 			res.MetaCID.String(),
 			inp.VersionedHash,
 			inp.TxHash,
-			inp.BlockNumber,
+			int64(inp.BlockNumber),
 			inp.BlockHash,
 			res.SizeBytes,
-		)
-		if err != nil {
-			return fmt.Errorf("db: save blob %s: %w", inp.Commitment, err)
 		}
+	}
+
+	if _, err := tx.CopyFrom(ctx,
+		pgx.Identifier{"ipld_blobs_stage"},
+		blobsCopyColumns,
+		pgx.CopyFromRows(rows),
+	); err != nil {
+		return fmt.Errorf("db: copy blobs epoch %d: %w", epoch, err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO ipld_blobs
+			(commitment, epoch, slot, slot_time, network, blob_index, data_cid, meta_cid,
+			 versioned_hash, tx_hash, block_number, block_hash, size_bytes)
+		SELECT commitment, epoch, slot, slot_time, network, blob_index, data_cid, meta_cid,
+		       versioned_hash, tx_hash, block_number, block_hash, size_bytes
+		FROM ipld_blobs_stage
+		ON CONFLICT (commitment) DO UPDATE SET
+			slot_time      = EXCLUDED.slot_time,
+			data_cid       = EXCLUDED.data_cid,
+			meta_cid       = EXCLUDED.meta_cid,
+			versioned_hash = EXCLUDED.versioned_hash,
+			tx_hash        = EXCLUDED.tx_hash,
+			block_number   = EXCLUDED.block_number,
+			block_hash     = EXCLUDED.block_hash,
+			created_at     = NOW()
+	`); err != nil {
+		return fmt.Errorf("db: upsert blobs epoch %d: %w", epoch, err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
