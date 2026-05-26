@@ -22,6 +22,7 @@ generator:
   hamt_threshold: 5000
   poll_interval: 12s
   start_epoch: 0
-  workers: 8
+  workers: 16          # parallel blob-processing goroutines per epoch (CPU-bound CID hashing); env GENERATOR_WORKERS
+  beacon_workers: 16   # parallel slot fetches per epoch (bounded by network.beacon_rate_limit); env GENERATOR_BEACON_WORKERS
   skip_existing_epochs: true
   api_listen: ":8080"  # address for the HTTP push API; remove or leave empty to disable

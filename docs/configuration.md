@@ -72,8 +72,8 @@ Controls DAG generation behaviour.
 | `hamt_threshold` | int | no | `5000` | If a single epoch contains this many blobs or more, the blob index uses HAMT shards instead of a flat map |
 | `poll_interval` | duration | no | `12s` | How often to query the beacon node for new finalized epochs. One Ethereum slot is 12 s; one epoch is 6.4 min |
 | `start_epoch` | uint64 | no | network default | First epoch to process when starting from scratch. When `0` (not set), the Deneb fork epoch is applied automatically for known networks (see table below). Override explicitly to resume from a specific epoch. |
-| `workers` | int | no | `4` | Number of goroutines in the parallel blob-processing worker pool per epoch |
-| `beacon_workers` | int | no | `8` | Number of slots fetched in parallel per epoch. Each slot is one HTTP request to the beacon node; raising this above `8` is rarely beneficial unless beacon node RTT is very high |
+| `workers` | int | no | `16` | Number of goroutines in the parallel blob-processing worker pool per epoch. CID hashing is CPU-bound on 131 KB blobs, so a value near vCPU count is a good default. Override via env `GENERATOR_WORKERS` |
+| `beacon_workers` | int | no | `16` | Number of slots fetched in parallel per epoch. Each slot is one HTTP request to the beacon node; the global cap is `network.beacon_rate_limit`. Override via env `GENERATOR_BEACON_WORKERS` |
 | `skip_existing_epochs` | bool | no | `false` | If `true` and a state file exists, start from `last_processed_epoch + 1` instead of `start_epoch` |
 
 ---
@@ -212,6 +212,8 @@ editing the YAML file. Environment variables take precedence over the file.
 | `IPFS_API_ADDR` | `ipfs.api_addr` |
 | `IPFS_SKIP_UPLOAD` | `ipfs.skip_upload` (set to `true` or `1` to enable) |
 | `IPFS_UPLOAD_WORKERS` | `ipfs.upload_workers` |
+| `GENERATOR_WORKERS` | `generator.workers` |
+| `GENERATOR_BEACON_WORKERS` | `generator.beacon_workers` |
 
 This is the mechanism used by the Docker Compose files — a single `config.yaml`
 is shared across networks and the per-deployment values are injected via the

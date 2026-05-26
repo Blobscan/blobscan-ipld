@@ -125,6 +125,16 @@ func (c *Config) applyEnvOverrides() {
 			c.IPFS.UploadWorkers = i
 		}
 	}
+	if v := os.Getenv("GENERATOR_WORKERS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.Generator.Workers = i
+		}
+	}
+	if v := os.Getenv("GENERATOR_BEACON_WORKERS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.Generator.BeaconWorkers = i
+		}
+	}
 	if v := os.Getenv("BLOBSCAN_API_URL"); v != "" {
 		c.Blobscan.APIURL = v
 	}
@@ -171,10 +181,10 @@ func (c *Config) applyDefaults() {
 		c.Generator.PollInterval = 12 * time.Second
 	}
 	if c.Generator.Workers == 0 {
-		c.Generator.Workers = 4
+		c.Generator.Workers = 16
 	}
 	if c.Generator.BeaconWorkers == 0 {
-		c.Generator.BeaconWorkers = 8
+		c.Generator.BeaconWorkers = 16
 	}
 	if c.Storage.CARDir == "" {
 		c.Storage.CARDir = c.Storage.DataDir + "/car"
