@@ -10,9 +10,11 @@ import (
 )
 
 func makeTestBlob(commitment string, epoch, slot uint64, idx int) types.BlobInput {
+	// Seed each blob's data with its idx so different blobs have different bytes
+	// and therefore different DataCIDs (matching real-world behaviour).
 	data := make([]byte, 131072) // 128 KiB
 	for i := range data {
-		data[i] = byte(i % 256)
+		data[i] = byte((i + idx) % 256)
 	}
 	return types.BlobInput{
 		Commitment:    commitment,
@@ -65,6 +67,48 @@ func TestProcessBlob(t *testing.T) {
 	// Blockstore must contain exactly 2 blocks: raw blob + metadata.
 	if bs.Len() != 2 {
 		t.Errorf("blockstore len: got %d, want 2", bs.Len())
+	}
+}
+
+// TestStoreBlobMetadataSizeField verifies that StoreBlobMetadata produces the same
+// MetaCID whether the size comes from len(inp.Data) or from inp.Size (DB-reconstruction
+// path where Data is nil but Size is explicitly set).
+func TestStoreBlobMetadataSizeField(t *testing.T) {
+	ctx := context.Background()
+
+	// Process a real blob to get the reference CIDs.
+	inp := makeTestBlob("0xaabbccdd", 100, 3200, 0)
+	bs1 := store.NewMemBlockstore()
+	lsys1 := store.NewLinkSystem(bs1)
+	ref, err := builder.ProcessBlob(ctx, lsys1, inp)
+	if err != nil {
+		t.Fatalf("ProcessBlob: %v", err)
+	}
+
+	// Simulate DB-reconstruction: Data is nil, Size is set from stored SizeBytes.
+	inpNoData := types.BlobInput{
+		Commitment:    inp.Commitment,
+		VersionedHash: inp.VersionedHash,
+		TxHash:        inp.TxHash,
+		BlockNumber:   inp.BlockNumber,
+		BlockHash:     inp.BlockHash,
+		Slot:          inp.Slot,
+		Epoch:         inp.Epoch,
+		Index:         inp.Index,
+		Data:          nil,
+		Size:          ref.SizeBytes, // populated from BlobResult.SizeBytes / DB
+	}
+
+	bs2 := store.NewMemBlockstore()
+	lsys2 := store.NewLinkSystem(bs2)
+	// StoreBlobMetadata requires a known dataCID; use the one from the real run.
+	metaCID, err := builder.StoreBlobMetadata(ctx, lsys2, inpNoData, ref.DataCID)
+	if err != nil {
+		t.Fatalf("StoreBlobMetadata with nil Data: %v", err)
+	}
+
+	if metaCID != ref.MetaCID {
+		t.Errorf("MetaCID mismatch: with nil Data got %s, with real Data got %s", metaCID, ref.MetaCID)
 	}
 }
 

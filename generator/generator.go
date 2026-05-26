@@ -542,6 +542,7 @@ func (g *Generator) reconstructFromDB(epoch uint64, records []db.BlobRecord) (ty
 			Slot:          r.Slot,
 			Epoch:         epoch,
 			Index:         r.BlobIndex,
+			Size:          r.SizeBytes, // Data is not loaded; Size ensures correct MetaCID
 		})
 
 		dataCID, err := cid.Decode(r.DataCID)

@@ -59,6 +59,13 @@ func StoreRawBlob(ctx context.Context, lsys ipld.LinkSystem, data []byte) (cid.C
 func StoreBlobMetadata(ctx context.Context, lsys ipld.LinkSystem, inp types.BlobInput, dataCID cid.Cid) (cid.Cid, error) {
 	dataLink := cidlink.Link{Cid: dataCID}
 
+	// Use inp.Size when set (e.g. reconstructed from DB without raw Data);
+	// fall back to len(inp.Data) when processing a freshly-fetched blob.
+	size := inp.Size
+	if size == 0 {
+		size = int64(len(inp.Data))
+	}
+
 	n, err := qp.BuildMap(basicnode.Prototype.Map, 10, func(ma ipld.MapAssembler) {
 		qp.MapEntry(ma, "commitment",    qp.String(inp.Commitment))
 		qp.MapEntry(ma, "versionedHash", qp.String(inp.VersionedHash))
@@ -68,7 +75,7 @@ func StoreBlobMetadata(ctx context.Context, lsys ipld.LinkSystem, inp types.Blob
 		qp.MapEntry(ma, "slot",          qp.Int(int64(inp.Slot)))
 		qp.MapEntry(ma, "epoch",         qp.Int(int64(inp.Epoch)))
 		qp.MapEntry(ma, "index",         qp.Int(int64(inp.Index)))
-		qp.MapEntry(ma, "size",          qp.Int(int64(len(inp.Data))))
+		qp.MapEntry(ma, "size",          qp.Int(size))
 		qp.MapEntry(ma, "data",          qp.Link(dataLink))
 	})
 	if err != nil {

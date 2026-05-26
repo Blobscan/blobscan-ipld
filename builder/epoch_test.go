@@ -89,37 +89,37 @@ func TestBuildRangeNode(t *testing.T) {
 	ctx := context.Background()
 
 	epochResults := make([]types.EpochResult, 3)
-	bsMap := make(map[uint64]*store.MemBlockstore)
 
 	for i := range epochResults {
 		epoch := uint64(100 + i)
-		res, bs := buildTestEpoch(t, epoch, 2)
+		res, _ := buildTestEpoch(t, epoch, 2)
 		epochResults[i] = res
-		bsMap[epoch] = bs
 	}
 
-	rangeBS, rangeResult, err := builder.BuildRangeNodeWithStore(ctx, "mainnet", epochResults, bsMap)
+	bs := store.NewMemBlockstore()
+	lsys := store.NewLinkSystem(bs)
+
+	rangeResult, err := builder.BuildRangeNode(ctx, lsys, "mainnet", epochResults)
 	if err != nil {
-		t.Fatalf("BuildRangeNodeWithStore: %v", err)
+		t.Fatalf("BuildRangeNode: %v", err)
 	}
 
-	if rangeResult.FirstEpoch != 100 {
-		t.Errorf("FirstEpoch: got %d, want 100", rangeResult.FirstEpoch)
-	}
-	if rangeResult.LastEpoch != 102 {
-		t.Errorf("LastEpoch: got %d, want 102", rangeResult.LastEpoch)
+	if rangeResult.Epoch != 100 {
+		t.Errorf("Epoch (first): got %d, want 100", rangeResult.Epoch)
 	}
 	if rangeResult.CID.String() == "" {
 		t.Error("RangeNode CID should not be empty")
 	}
-	if rangeBS.Len() == 0 {
+	if bs.Len() == 0 {
 		t.Error("range blockstore should not be empty")
 	}
 
 	// Determinism check.
-	_, rangeResult2, err := builder.BuildRangeNodeWithStore(ctx, "mainnet", epochResults, bsMap)
+	bs2 := store.NewMemBlockstore()
+	lsys2 := store.NewLinkSystem(bs2)
+	rangeResult2, err := builder.BuildRangeNode(ctx, lsys2, "mainnet", epochResults)
 	if err != nil {
-		t.Fatalf("BuildRangeNodeWithStore (2nd): %v", err)
+		t.Fatalf("BuildRangeNode (2nd): %v", err)
 	}
 	if rangeResult.CID != rangeResult2.CID {
 		t.Errorf("RangeNode CID not deterministic: %s != %s", rangeResult.CID, rangeResult2.CID)

@@ -19,6 +19,11 @@ type BlobInput struct {
 	Epoch         uint64
 	Index         int    // blob index within the transaction
 	Data          []byte // raw 128 KiB blob field element data
+	// Size is the authoritative byte length of Data. It must be set explicitly
+	// when Data is not loaded (e.g. when reconstructing from the DB) so that
+	// StoreBlobMetadata produces the same CID as the original. When Data is
+	// present, Size may be left as zero and len(Data) is used as the fallback.
+	Size int64
 }
 
 // EpochInput groups all blobs that belong to a single finalized epoch.
