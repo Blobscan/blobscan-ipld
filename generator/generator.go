@@ -1007,10 +1007,22 @@ func (g *Generator) BackfillIPFS(ctx context.Context, fromEpoch, toEpoch uint64)
 		)
 
 		// Upload all blocks (blob data + metadata + epoch node + HAMT) to IPFS.
-		if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
-			g.log.Error("backfill-ipfs: IPFS upload failed, skipping epoch", "epoch", epoch, "err", err)
-			skipped++
-			continue
+		// Retry indefinitely on transient errors (e.g. IPFS node not yet reachable).
+		// block/put is idempotent on Kubo, so retrying a partial upload is safe.
+		for {
+			err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			g.log.Error("backfill-ipfs: IPFS upload failed, retrying", "epoch", epoch, "err", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(g.cfg.Generator.PollInterval):
+			}
 		}
 
 		// Persist/update epoch row (idempotent ON CONFLICT DO UPDATE).

@@ -501,6 +501,13 @@ For each epoch in the range the command:
 A single beacon RPC error on one epoch is logged and skipped; the rest of the
 run continues. Use `-log-level debug` to see per-block IPFS upload progress.
 
+**IPFS upload errors are retried indefinitely** (with `poll_interval` between
+attempts) rather than skipping the epoch. This handles transient failures such
+as the IPFS container being temporarily unreachable (e.g. Docker DNS not yet
+resolving `ipfs` during startup). Because `block/put` is idempotent on Kubo,
+resuming a partially-uploaded epoch is safe. The retry loop exits as soon as the
+upload succeeds or the process receives a shutdown signal (SIGINT/SIGTERM).
+
 **Beacon node custody window:**
 
 Standard beacon nodes only retain blob sidecars for ~18 days (4096 epochs). For
