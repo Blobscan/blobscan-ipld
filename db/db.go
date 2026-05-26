@@ -259,13 +259,19 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 		return fmt.Errorf("db: copy blobs epoch %d: %w", epoch, err)
 	}
 
+	// DISTINCT ON deduplicates rows that share the same commitment (e.g. the
+	// zero blob appearing multiple times in one epoch). Without it Postgres
+	// raises SQLSTATE 21000 when a single INSERT/SELECT would update the same
+	// target row twice. ORDER BY commitment is required by DISTINCT ON syntax.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO ipld_blobs
 			(commitment, epoch, slot, slot_time, network, blob_index, data_cid, meta_cid,
 			 versioned_hash, tx_hash, block_number, block_hash, size_bytes)
-		SELECT commitment, epoch, slot, slot_time, network, blob_index, data_cid, meta_cid,
+		SELECT DISTINCT ON (commitment)
+		       commitment, epoch, slot, slot_time, network, blob_index, data_cid, meta_cid,
 		       versioned_hash, tx_hash, block_number, block_hash, size_bytes
 		FROM ipld_blobs_stage
+		ORDER BY commitment
 		ON CONFLICT (commitment) DO UPDATE SET
 			slot_time      = EXCLUDED.slot_time,
 			data_cid       = EXCLUDED.data_cid,
