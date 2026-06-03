@@ -159,6 +159,9 @@ func (c *Config) validate() error {
 	if c.Storage.DataDir == "" {
 		return fmt.Errorf("storage.data_dir is required")
 	}
+	if c.Generator.NetworkRootPageSize != 0 && c.Generator.NetworkRootPageSize < 1000 {
+		return fmt.Errorf("generator.network_root_page_size must be >= 1000 (got %d)", c.Generator.NetworkRootPageSize)
+	}
 	return nil
 }
 
@@ -194,9 +197,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Generator.NetworkRootPageSize == 0 {
 		c.Generator.NetworkRootPageSize = 10000
-	}
-	if c.Generator.NetworkRootPageSize < 1000 {
-		c.Generator.NetworkRootPageSize = 1000
 	}
 	if c.Storage.CARDir == "" {
 		c.Storage.CARDir = c.Storage.DataDir + "/car"

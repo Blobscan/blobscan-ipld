@@ -35,8 +35,8 @@ func BuildNetworkRoot(
 	epochs []types.EpochResult,
 	pageSize int,
 ) (types.NetworkRootResult, error) {
-	if pageSize < 1 {
-		pageSize = 10000
+	if pageSize < 1000 {
+		pageSize = 1000
 	}
 
 	// Sort by epoch number for determinism.
