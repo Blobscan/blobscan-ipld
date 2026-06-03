@@ -84,6 +84,16 @@ services:
       CAR_DIR: "/car"
     command: ["run"]
 
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}"
+    depends_on:
+      ipfs:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   ipfs_data:
