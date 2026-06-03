@@ -75,6 +75,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 		if err != nil {
 			return nil, fmt.Errorf("generator: create ipfs client: %w", err)
 		}
+		log.Info("✓ IPFS upload enabled", "api_addr", cfg.IPFS.APIAddr)
 	} else {
 		log.Info("⊘ IPFS upload disabled (skip_upload=true); CIDs will be computed but not uploaded")
 	}
