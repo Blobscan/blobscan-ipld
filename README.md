@@ -13,14 +13,15 @@ self-contained CAR v2 archives, and publishes a mutable network root via IPNS.
 # 1. Build the binary
 go build ./cmd/blobscan-ipld
 
-# 2. Copy and edit the example config
-cp config.yaml mainnet.yaml   # set beacon_rpc, ipfs.api_addr, storage.data_dir
+# 2. Set required environment variables
+cp .env.example .env   # edit NETWORK_NAME, BEACON_RPC, DATA_DIR, IPFS_API_ADDR
 
 # 3. Run (beacon-pull mode)
-./blobscan-ipld -config mainnet.yaml run
+export $(grep -v '^#' .env | xargs)
+./blobscan-ipld run
 
 # Or start the HTTP push API instead
-./blobscan-ipld -config mainnet.yaml serve
+./blobscan-ipld serve
 ```
 
 ## How it works
@@ -77,7 +78,7 @@ Full field-level documentation: [`docs/data-model.md`](docs/data-model.md)
 ```
 blobscan-ipld/
 ├── cmd/blobscan-ipld/main.go   CLI entry point; subcommands: run, serve, epoch, finalize-epoch, export-car, export-car-range
-├── config/config.go            YAML loader, validation, defaults
+├── config/config.go            Env-var loader, validation, defaults
 ├── types/types.go              Pure domain types — no IPLD imports
 ├── api/server.go               HTTP push API server (POST /blob, GET /healthz)
 ├── db/db.go                    PostgreSQL client: schema migration, SaveBlobs, SaveEpoch, state backend
@@ -94,13 +95,13 @@ blobscan-ipld/
 ├── state/manager.go            state.Backend interface; file-backed Manager
 ├── generator/generator.go      Orchestrator: beacon-pull loop, push API callbacks, epoch finalizer
 ├── schema/schema.ipldsch       Canonical IPLD schema (reference only)
-├── config.yaml                 Annotated example configuration
+├── .env.example                Annotated example environment variables
 └── docs/                       Extended documentation
 ```
 
 ## CLI subcommands
 
-Global flags (before subcommand): `-config <path>` (default: `config.yaml`), `-log-level <level>` (default: `info`)
+Global flags (before subcommand): `-log-level <level>` (default: `info`)
 
 | Subcommand | Description |
 |------------|-------------|
@@ -113,18 +114,15 @@ Global flags (before subcommand): `-config <path>` (default: `config.yaml`), `-l
 
 ## Configuration reference
 
-See [`docs/configuration.md`](docs/configuration.md) for every field and its
-default. Minimum required fields:
+See [`docs/configuration.md`](docs/configuration.md) for every variable and its
+default. Minimum required environment variables:
 
-```yaml
-network:
-  name: mainnet
-  beacon_rpc: "http://localhost:5052"   # omit when using push API only
-ipfs:
-  api_addr: "/ip4/127.0.0.1/tcp/5001"
-storage:
-  data_dir: "/var/lib/blobscan-ipld/mainnet"
-  postgres_dsn: "postgres://user:pass@localhost:5432/blobscan"  # optional
+```bash
+NETWORK_NAME=mainnet
+BEACON_RPC=http://localhost:5052   # omit when using push API only
+IPFS_API_ADDR=/ip4/127.0.0.1/tcp/5001
+DATA_DIR=/var/lib/blobscan-ipld/mainnet
+POSTGRES_DSN=postgres://user:pass@localhost:5432/blobscan  # optional
 ```
 
 ## Pinning
@@ -175,4 +173,3 @@ go test ./...
 | `github.com/jackc/pgx/v5` | PostgreSQL driver and connection pool |
 | `github.com/multiformats/go-multicodec` | Multicodec constants (raw, dag-cbor) |
 | `github.com/multiformats/go-multihash` | Multihash construction for CID building |
-| `gopkg.in/yaml.v3` | YAML config parsing |

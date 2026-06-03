@@ -390,25 +390,22 @@ with the right permissions:
 mkdir -p /var/lib/blobscan-ipld/mainnet/car
 ```
 
-### 2. Write a config file
+### 2. Set environment variables
 
-Copy the example and edit the required fields:
+Copy the example and edit the required values:
 
 ```bash
-cp config.yaml mainnet.yaml
+cp .env.example .env
 ```
 
-Minimum required fields:
+Minimum required variables:
 
-```yaml
-network:
-  name: mainnet
-  beacon_rpc: "http://localhost:5052"
-ipfs:
-  api_addr: "/ip4/127.0.0.1/tcp/5001"
-storage:
-  data_dir: "/var/lib/blobscan-ipld/mainnet"
-  postgres_dsn: "postgres://user:pass@localhost:5432/blobscan"  # optional
+```bash
+NETWORK_NAME=mainnet
+BEACON_RPC=http://localhost:5052
+IPFS_API_ADDR=/ip4/127.0.0.1/tcp/5001
+DATA_DIR=/var/lib/blobscan-ipld/mainnet
+POSTGRES_DSN=postgres://user:pass@localhost:5432/blobscan  # optional
 ```
 
 ### 4. Build
@@ -424,7 +421,7 @@ go build ./cmd/blobscan-ipld
 ### Continuous mode (normal operation)
 
 ```bash
-./blobscan-ipld -config mainnet.yaml run
+./blobscan-ipld run
 ```
 
 The generator:
@@ -449,7 +446,8 @@ Description=Blobscan IPLD DAG Generator
 After=network.target ipfs.service
 
 [Service]
-ExecStart=/usr/local/bin/blobscan-ipld -config /etc/blobscan-ipld/mainnet.yaml run
+EnvironmentFile=/etc/blobscan-ipld/mainnet.env
+ExecStart=/usr/local/bin/blobscan-ipld run
 Restart=on-failure
 RestartSec=10s
 User=blobscan
@@ -469,10 +467,10 @@ indexed without requiring any manual SQL queries.
 
 ```bash
 # Default: epoch count, blob count, data size, time range, cursors
-./blobscan-ipld -config sepolia.yaml summary
+./blobscan-ipld summary
 
 # Full detail: all flags enabled
-./blobscan-ipld -config sepolia.yaml summary -gaps -top 10 -monthly -check-ipfs
+./blobscan-ipld summary -gaps -top 10 -monthly -check-ipfs
 ```
 
 **Example output:**
@@ -530,20 +528,20 @@ for overall IPFS upload completeness. Use `backfill-ipfs` to recover missing epo
 
 ## Uploading historical epochs to IPFS (backfill-ipfs)
 
-If the indexer was previously run with `ipfs.skip_upload: true` (or without an
+If the indexer was previously run with `IPFS_SKIP_UPLOAD=true` (or without an
 IPFS node configured), the DB contains correct CIDs but the actual IPLD blocks
 were never uploaded to IPFS. Use the `backfill-ipfs` subcommand to recover:
 
 ```bash
 # Upload all epochs stored in the DB
-./blobscan-ipld -config mainnet.yaml backfill-ipfs
+./blobscan-ipld backfill-ipfs
 
 # Upload a specific range only
-./blobscan-ipld -config mainnet.yaml backfill-ipfs -from 269568 -to 270000
+./blobscan-ipld backfill-ipfs -from 269568 -to 270000
 ```
 
 **Requirements:**
-- `ipfs.skip_upload` must be `false` (an IPFS node must be reachable).
+- `IPFS_SKIP_UPLOAD` must be unset or `false` (an IPFS node must be reachable).
 - `storage.postgres_dsn` must be set.
 - `network.beacon_rpc` must be set — blob data is re-fetched from the beacon
   node because the raw 128 KiB bytes were never persisted locally.
@@ -589,11 +587,11 @@ Use the `epoch` subcommand to process a single epoch and exit. This is useful fo
 
 ```bash
 # Process epoch 300000 only
-./blobscan-ipld -config mainnet.yaml -n 300000 epoch
+./blobscan-ipld -n 300000 epoch
 ```
 
-To backfill a range of epochs, set `start_epoch` in the config and run in
-continuous mode with `skip_existing_epochs: false`. The generator will process
+To backfill a range of epochs, set `GENERATOR_START_EPOCH` and run in
+continuous mode with `GENERATOR_SKIP_EXISTING_EPOCHS=false`. The generator will process
 all epochs from `start_epoch` to the current finalized epoch before entering
 the normal poll loop.
 

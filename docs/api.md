@@ -55,13 +55,13 @@ Beacon Node REST API
 **Start:**
 
 ```bash
-blobscan-ipld -config mainnet.yaml run
+blobscan-ipld run
 ```
 
 **Process a single epoch one-shot (useful for backfill or testing):**
 
 ```bash
-blobscan-ipld -config mainnet.yaml -n 269568 epoch
+blobscan-ipld -n 269568 epoch
 ```
 
 ---
@@ -104,7 +104,7 @@ External system (indexer / RPC / scraper)
 **Start:**
 
 ```bash
-blobscan-ipld -config mainnet.yaml serve
+blobscan-ipld serve
 ```
 
 Default listen address: `:8080`. Override with `generator.api_listen`.
@@ -114,7 +114,7 @@ as they arrive but only builds the `EpochNode` when told to (see `finalize`
 in `POST /blob`, or run the CLI explicitly):
 
 ```bash
-blobscan-ipld -config mainnet.yaml -n 269568 finalize-epoch
+blobscan-ipld -n 269568 finalize-epoch
 ```
 
 > **Note:** `finalize-epoch` requires DB persistence because it reloads blob
@@ -131,7 +131,7 @@ live chain while the push API accepts historical or supplementary data
 concurrently.
 
 ```bash
-blobscan-ipld -config mainnet.yaml -pull serve
+blobscan-ipld -pull serve
 ```
 
 The pull loop runs in a background goroutine; the push API handles incoming
@@ -296,7 +296,7 @@ for blob in blobs_${EPOCH}/*.json; do
          -d @"$blob"
 done
 
-blobscan-ipld -config $CONFIG -n $EPOCH finalize-epoch
+blobscan-ipld -n $EPOCH finalize-epoch
 ```
 
 ### 2. Explicit finalize on last blob
@@ -326,10 +326,10 @@ by the push API or the beacon-pull loop. Run it on demand:
 
 ```bash
 # Export epoch 269568 to the default path (<car_dir>/<network>/269568.car)
-blobscan-ipld -config mainnet.yaml -n 269568 export-car
+blobscan-ipld -n 269568 export-car
 
 # Export to a custom path
-blobscan-ipld -config mainnet.yaml -n 269568 -out /tmp/269568.car export-car
+blobscan-ipld -n 269568 -out /tmp/269568.car export-car
 ```
 
 The command:
@@ -349,11 +349,10 @@ ipfs dag import 269568.car
 
 ## Configuration
 
-Relevant config fields in `config.yaml`:
+Relevant environment variable:
 
-```yaml
-generator:
-  api_listen: ":8080"   # address for the push API; empty = disabled
+```bash
+GENERATOR_API_LISTEN=:8080   # address for the push API; unset = disabled
 ```
 
 See `docs/configuration.md` for the full reference.

@@ -20,4 +20,4 @@ VOLUME ["/data", "/car"]
 EXPOSE 8080
 
 ENTRYPOINT ["blobscan-ipld"]
-CMD ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
+CMD ["run"]
