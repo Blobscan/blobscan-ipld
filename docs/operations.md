@@ -204,6 +204,50 @@ for a fresh deployment — skip to [Initial setup](#initial-setup).
 > **Note:** Kubo profiles are only applied when the repo is *first*
 > initialised. Use a fresh data volume so the `pebbleds` profile takes effect.
 
+#### Enabling Kubo logging
+
+To debug IPFS uploads or inspect incoming requests, enable Kubo's structured
+logging by adding environment variables to the `ipfs` service in `docker-compose.yml`:
+
+```yaml
+ipfs:
+  image: ipfs/kubo:latest
+  environment:
+    IPFS_PROFILE: "server,pebbleds"
+    GOLOG_LOG_LEVEL: "info"  # or "debug" for verbose output
+```
+
+Log levels:
+- `info` — General activity, including HTTP API requests to port 5001
+- `debug` — Very detailed, includes request/response bodies (verbose)
+- `warn` — Only warnings and errors
+
+View logs after startup:
+```bash
+docker-compose logs ipfs -f
+```
+
+#### Checking what Kubo has indexed
+
+To see what blocks Kubo has stored so far:
+
+```bash
+# Total repository size and block count
+docker-compose exec ipfs ipfs repo stat
+
+# List all content hashes currently stored
+docker-compose exec ipfs ipfs refs local
+
+# Count total blocks
+docker-compose exec ipfs ipfs refs local | wc -l
+
+# See pinned content
+docker-compose exec ipfs ipfs pin ls
+```
+
+Run these commands before and after uploads to verify that new data is being
+stored in Kubo.
+
 ### 1. Install Kubo with Pebble support
 
 The `pebbleds` plugin ships in the default Kubo build from v0.31.0 onward —
@@ -268,8 +312,7 @@ This produces a `Datastore.Spec` section like:
 }
 ```
 
-Raise `StorageMax` to match the disk you've allocated (e.g. `100GB` or more
-for mainnet).
+Raise `StorageMax` to match the disk you've allocated (e.g. `8TB` for archival mainnet).
 
 ### 3. Configure the API and Gateway (optional)
 
@@ -310,6 +353,82 @@ exposed by Kubo can be set in `Datastore.Spec.mounts[0].child`:
 | `formatMajorVersion` | `0` | Use the latest format Pebble supports; bump only on advice from Pebble release notes |
 
 For most deployments leaving the defaults is fine.
+
+### 5. Configure storage limits (StorageMax)
+
+The `StorageMax` setting in Kubo's config controls the maximum size of stored
+blocks before garbage collection is triggered. It's configured when the repo is
+first initialised and stored in `~/.ipfs/config`:
+
+```json
+"Datastore": {
+  "StorageMax": "8TB",
+  "StorageGCWatermark": 90,
+  "GCPeriod": "1h"
+}
+```
+
+**You can change `StorageMax` at any time** — edit the config file and restart
+Kubo, no repo reinitialization needed.
+
+#### For Docker Compose deployments
+
+Edit the Kubo config *inside the running container*:
+
+```bash
+# Start a shell in the Kubo container
+docker-compose exec ipfs sh
+
+# Edit the config (requires `apk add nano` or `vi`)
+vi /data/ipfs/config
+
+# Change the StorageMax value, then exit
+# Restart the container to apply changes
+docker-compose restart ipfs
+```
+
+Or use a one-liner to edit directly:
+
+```bash
+# Increase StorageMax to 8TB
+docker-compose exec ipfs sh -c 'sed -i "s/\"StorageMax\": \"[^\"]*\"/\"StorageMax\": \"8TB\"/" /data/ipfs/config'
+
+docker-compose restart ipfs
+```
+
+#### Recommended values
+
+| Use case | StorageMax |
+|----------|-----------|
+| Testing / Sepolia | `20GB` |
+| Mainnet (small history) | `100GB` |
+| **Blob archival (recommended)** | **`8TB` or higher** |
+
+`StorageMax` is not a hard limit — Kubo will write beyond it if needed, but
+triggers automatic garbage collection when exceeded. Setting it too low causes
+frequent GC; setting it high gives Kubo more breathing room before cleanup.
+
+> **For blob archival:** Since blobs are immutable and indexed forever, set
+> `StorageMax` to match your available disk space (e.g., `8TB`). Garbage
+> collection is wasteful — Kubo would trigger GC once full, delete pinned blocks,
+> and re-download them from peers on next access. Instead, allocate enough disk
+> to store the entire blob history without GC, then pin everything permanently
+> with `ipfs pin add`.
+
+#### Decreasing StorageMax
+
+If you decrease `StorageMax` below the current repo size, Kubo will **delete
+blocks** via garbage collection on next startup to bring the repo under the new
+limit. **This is destructive** — blocks that are not pinned will be lost.
+
+To safely decrease `StorageMax`:
+1. Ensure all important blocks are pinned: `ipfs pin add -r <CID>`
+2. Edit the config and decrease `StorageMax`
+3. Restart Kubo — it will run GC and delete unpinned blocks until under the limit
+4. Verify with `ipfs repo stat` that the new size is respected
+
+For blob archival, **never decrease `StorageMax` below your indexed data size**.
+Keep it set to your full disk capacity to avoid accidental data loss.
 
 ### 6. Start the IPFS daemon
 
