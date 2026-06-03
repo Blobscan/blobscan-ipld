@@ -5,87 +5,76 @@ import (
 	"os"
 	"strconv"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Config is the top-level configuration for the blobscan-ipld generator.
 type Config struct {
-	Network   NetworkConfig   `yaml:"network"`
-	IPFS      IPFSConfig      `yaml:"ipfs"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Generator GeneratorConfig `yaml:"generator"`
-	Blobscan  BlobscanConfig  `yaml:"blobscan"`
+	Network   NetworkConfig
+	IPFS      IPFSConfig
+	Storage   StorageConfig
+	Generator GeneratorConfig
+	Blobscan  BlobscanConfig
 }
 
 // BlobscanConfig holds connection settings for reporting CID references back to
 // the blobscan REST API.
 type BlobscanConfig struct {
-	APIURL string `yaml:"api_url"` // e.g. http://blobscan:3001
-	APIKey string `yaml:"api_key"` // value of IPFS_STORAGE_API_KEY in blobscan
+	APIURL string // e.g. http://blobscan:3001
+	APIKey string // value of IPFS_STORAGE_API_KEY in blobscan
 }
 
 // NetworkConfig identifies the Ethereum network being indexed.
 type NetworkConfig struct {
-	Name              string        `yaml:"name"`                // e.g. "mainnet", "sepolia"
-	BeaconRPC         string        `yaml:"beacon_rpc"`          // Beacon node REST API base URL (optional when using the push API)
-	BeaconTimeout     time.Duration `yaml:"beacon_timeout"`      // HTTP timeout for beacon requests (optional; default 60s)
-	BeaconRateLimit   float64       `yaml:"beacon_rate_limit"`   // max requests per second to beacon RPC (optional; default 100)
-	BeaconRateBurst   int           `yaml:"beacon_rate_burst"`   // token bucket burst size (optional; default 10)
-	Beacon429Backoff  time.Duration `yaml:"beacon_429_backoff"`  // initial backoff for 429 errors (optional; default 1s)
+	Name             string        // e.g. "mainnet", "sepolia"
+	BeaconRPC        string        // Beacon node REST API base URL (optional when using the push API)
+	BeaconTimeout    time.Duration // HTTP timeout for beacon requests (optional; default 60s)
+	BeaconRateLimit  float64       // max requests per second to beacon RPC (optional; default 100)
+	BeaconRateBurst  int           // token bucket burst size (optional; default 10)
+	Beacon429Backoff time.Duration // initial backoff for 429 errors (optional; default 1s)
 }
 
 // IPFSConfig holds connection settings for the IPFS node.
 type IPFSConfig struct {
-	APIAddr       string        `yaml:"api_addr"`       // e.g. "/ip4/127.0.0.1/tcp/5001"
-	PinOnAdd      bool          `yaml:"pin_on_add"`
-	Timeout       time.Duration `yaml:"timeout"`
-	SkipUpload    bool          `yaml:"skip_upload"`    // compute CIDs only; do not connect to or upload to IPFS
-	UploadWorkers int           `yaml:"upload_workers"` // parallel block uploads in PutBlockstore (default 16)
+	APIAddr       string        // e.g. "/ip4/127.0.0.1/tcp/5001"
+	PinOnAdd      bool
+	Timeout       time.Duration
+	SkipUpload    bool // compute CIDs only; do not connect to or upload to IPFS
+	UploadWorkers int  // parallel block uploads in PutBlockstore (default 16)
 }
 
 // StorageConfig controls local storage paths and the database connection.
 type StorageConfig struct {
-	DataDir     string `yaml:"data_dir"`     // root directory for state file and CAR files
-	CARDir      string `yaml:"car_dir"`      // subdirectory for per-epoch CAR v2 files
-	PostgresDSN string `yaml:"postgres_dsn"` // PostgreSQL connection string (optional)
+	DataDir     string // root directory for state file and CAR files
+	CARDir      string // subdirectory for per-epoch CAR v2 files
+	PostgresDSN string // PostgreSQL connection string (optional)
 }
 
 // GeneratorConfig controls the DAG generation behaviour.
 type GeneratorConfig struct {
-	HAMTThreshold       int           `yaml:"hamt_threshold"`        // blobs per epoch before switching to HAMT
-	PollInterval        time.Duration `yaml:"poll_interval"`         // how often to check for new finalized epochs
-	StartEpoch          uint64        `yaml:"start_epoch"`           // first epoch to process (0 = genesis)
-	Workers             int           `yaml:"workers"`               // parallel blob-processing goroutines
-	BeaconWorkers       int           `yaml:"beacon_workers"`        // parallel slot fetches per epoch
-	SkipExistingEpochs  bool          `yaml:"skip_existing_epochs"`  // resume from last processed epoch
-	APIListen           string        `yaml:"api_listen"`            // address for the HTTP push API (e.g. ":8080"); empty = disabled
-	NetworkRootPageSize int           `yaml:"network_root_page_size"` // max epochs per NetworkRoot page (default 10000)
+	HAMTThreshold       int           // blobs per epoch before switching to HAMT
+	PollInterval        time.Duration // how often to check for new finalized epochs
+	StartEpoch          uint64        // first epoch to process (0 = genesis)
+	Workers             int           // parallel blob-processing goroutines
+	BeaconWorkers       int           // parallel slot fetches per epoch
+	SkipExistingEpochs  bool          // resume from last processed epoch
+	APIListen           string        // address for the HTTP push API (e.g. ":8080"); empty = disabled
+	NetworkRootPageSize int           // max epochs per NetworkRoot page (default 10000)
 }
 
-// Load reads and validates a YAML config file.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("config: read file %q: %w", path, err)
-	}
-
+// Load builds a Config entirely from environment variables and built-in defaults.
+func Load() (*Config, error) {
 	cfg := &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("config: parse %q: %w", path, err)
-	}
-
-	cfg.applyEnvOverrides()
+	cfg.applyEnv()
 
 	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("config: validation: %w", err)
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	cfg.applyDefaults()
 	return cfg, nil
 }
 
-func (c *Config) applyEnvOverrides() {
+func (c *Config) applyEnv() {
 	if v := os.Getenv("NETWORK_NAME"); v != "" {
 		c.Network.Name = v
 	}
@@ -115,8 +104,17 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("POSTGRES_DSN"); v != "" {
 		c.Storage.PostgresDSN = v
 	}
+	if v := os.Getenv("DATA_DIR"); v != "" {
+		c.Storage.DataDir = v
+	}
+	if v := os.Getenv("CAR_DIR"); v != "" {
+		c.Storage.CARDir = v
+	}
 	if v := os.Getenv("IPFS_API_ADDR"); v != "" {
 		c.IPFS.APIAddr = v
+	}
+	if v := os.Getenv("IPFS_PIN_ON_ADD"); v == "true" || v == "1" {
+		c.IPFS.PinOnAdd = true
 	}
 	if v := os.Getenv("IPFS_SKIP_UPLOAD"); v == "true" || v == "1" {
 		c.IPFS.SkipUpload = true
@@ -136,6 +134,27 @@ func (c *Config) applyEnvOverrides() {
 			c.Generator.BeaconWorkers = i
 		}
 	}
+	if v := os.Getenv("GENERATOR_POLL_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Generator.PollInterval = d
+		}
+	}
+	if v := os.Getenv("GENERATOR_START_EPOCH"); v != "" {
+		if i, err := strconv.ParseUint(v, 10, 64); err == nil {
+			c.Generator.StartEpoch = i
+		}
+	}
+	if v := os.Getenv("GENERATOR_HAMT_THRESHOLD"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.Generator.HAMTThreshold = i
+		}
+	}
+	if v := os.Getenv("GENERATOR_SKIP_EXISTING_EPOCHS"); v == "true" || v == "1" {
+		c.Generator.SkipExistingEpochs = true
+	}
+	if v := os.Getenv("GENERATOR_API_LISTEN"); v != "" {
+		c.Generator.APIListen = v
+	}
 	if v := os.Getenv("NETWORK_ROOT_PAGE_SIZE"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			c.Generator.NetworkRootPageSize = i
@@ -151,16 +170,16 @@ func (c *Config) applyEnvOverrides() {
 
 func (c *Config) validate() error {
 	if c.Network.Name == "" {
-		return fmt.Errorf("network.name is required")
+		return fmt.Errorf("NETWORK_NAME is required")
 	}
 	if c.IPFS.APIAddr == "" && !c.IPFS.SkipUpload {
-		return fmt.Errorf("ipfs.api_addr is required (or set ipfs.skip_upload: true)")
+		return fmt.Errorf("IPFS_API_ADDR is required (or set IPFS_SKIP_UPLOAD=true)")
 	}
 	if c.Storage.DataDir == "" {
-		return fmt.Errorf("storage.data_dir is required")
+		return fmt.Errorf("DATA_DIR is required")
 	}
 	if c.Generator.NetworkRootPageSize != 0 && c.Generator.NetworkRootPageSize < 1000 {
-		return fmt.Errorf("generator.network_root_page_size must be >= 1000 (got %d)", c.Generator.NetworkRootPageSize)
+		return fmt.Errorf("NETWORK_ROOT_PAGE_SIZE must be >= 1000 (got %d)", c.Generator.NetworkRootPageSize)
 	}
 	return nil
 }

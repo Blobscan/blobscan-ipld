@@ -45,26 +45,28 @@ Subcommands:
   summary          Show indexed-data statistics (use -help for detail flags)
 
 Global flags (before subcommand):
-  -config <path>      Path to YAML config file (default: config.yaml)
   -log-level <level>  Log level: debug, info, warn, error (default: info)
 
+Environment variables:
+  NETWORK_NAME, BEACON_RPC, DATA_DIR, IPFS_API_ADDR, POSTGRES_DSN, ...
+  See docs/configuration.md for the full list.
+
 Examples:
-  blobscan-ipld -config mainnet.yaml run
-  blobscan-ipld -config mainnet.yaml serve
-  blobscan-ipld -config mainnet.yaml -n 300000 epoch
-  blobscan-ipld -config mainnet.yaml -n 300000 finalize-epoch
-  blobscan-ipld -config mainnet.yaml -n 300000 -out /tmp/300000.car export-car
-  blobscan-ipld -config mainnet.yaml -from 300000 -to 300099 -out /tmp/range.car export-car-range
-  blobscan-ipld -config mainnet.yaml backfill-ipfs
-  blobscan-ipld -config mainnet.yaml backfill-ipfs -from 300000 -to 300099
-  blobscan-ipld -config mainnet.yaml summary
-  blobscan-ipld -config mainnet.yaml summary -gaps -top 10 -monthly -check-ipfs
+  blobscan-ipld run
+  blobscan-ipld serve
+  blobscan-ipld -n 300000 epoch
+  blobscan-ipld -n 300000 finalize-epoch
+  blobscan-ipld -n 300000 -out /tmp/300000.car export-car
+  blobscan-ipld -from 300000 -to 300099 -out /tmp/range.car export-car-range
+  blobscan-ipld backfill-ipfs
+  blobscan-ipld backfill-ipfs -from 300000 -to 300099
+  blobscan-ipld summary
+  blobscan-ipld summary -gaps -top 10 -monthly -check-ipfs
 `
 
 func main() {
 	// Global flags parsed before the subcommand.
 	globalFlags := flag.NewFlagSet("blobscan-ipld", flag.ExitOnError)
-	configPath := globalFlags.String("config", "config.yaml", "path to YAML config file")
 	logLevel := globalFlags.String("log-level", "info", "log level: debug, info, warn, error")
 	globalFlags.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 
@@ -87,7 +89,7 @@ func main() {
 
 	log := newLogger(*logLevel)
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load()
 	if err != nil {
 		log.Error("failed to load config", "err", err)
 		os.Exit(1)

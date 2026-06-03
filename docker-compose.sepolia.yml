@@ -42,7 +42,6 @@ services:
       ipfs:
         condition: service_healthy
     volumes:
-      - ./config.yaml:/etc/blobscan-ipld/config.yaml:ro
       - blobscan_sepolia_data:/data
       - blobscan_sepolia_car:/car
     ports:
@@ -55,8 +54,10 @@ services:
       BEACON_429_BACKOFF: "1s"
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_sepolia?sslmode=disable"
       IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
+      DATA_DIR: "/data"
+      CAR_DIR: "/car"
       IPFS_SKIP_UPLOAD: "true"
-    command: ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
+    command: ["run"]
 
   hoodi:
     build: .
@@ -67,7 +68,6 @@ services:
       ipfs:
         condition: service_healthy
     volumes:
-      - ./config.yaml:/etc/blobscan-ipld/config.yaml:ro
       - blobscan_hoodi_data:/data
       - blobscan_hoodi_car:/car
     ports:
@@ -80,8 +80,10 @@ services:
       BEACON_429_BACKOFF: "1s"
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_hoodi?sslmode=disable"
       IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
+      DATA_DIR: "/data"
+      CAR_DIR: "/car"
       IPFS_SKIP_UPLOAD: "true"
-    command: ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
+    command: ["run"]
 
 volumes:
   postgres_sepolia_data:
