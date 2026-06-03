@@ -371,28 +371,20 @@ first initialised and stored in `~/.ipfs/config`:
 **You can change `StorageMax` at any time** — edit the config file and restart
 Kubo, no repo reinitialization needed.
 
-#### For Docker Compose deployments
+#### Checking and editing StorageMax
 
-Edit the Kubo config *inside the running container*:
+Check the current value:
 
 ```bash
-# Start a shell in the Kubo container
-docker-compose exec ipfs sh
-
-# Edit the config (requires `apk add nano` or `vi`)
-vi /data/ipfs/config
-
-# Change the StorageMax value, then exit
-# Restart the container to apply changes
-docker-compose restart ipfs
+docker-compose exec ipfs ipfs config Datastore.StorageMax
 ```
 
-Or use a one-liner to edit directly:
+Change it using `ipfs config`:
 
 ```bash
-# Increase StorageMax to 8TB
-docker-compose exec ipfs sh -c 'sed -i "s/\"StorageMax\": \"[^\"]*\"/\"StorageMax\": \"8TB\"/" /data/ipfs/config'
+docker-compose exec ipfs ipfs config Datastore.StorageMax 8TB
 
+# Restart Kubo to apply the change
 docker-compose restart ipfs
 ```
 

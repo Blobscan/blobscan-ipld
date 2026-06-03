@@ -21,6 +21,7 @@ services:
     restart: unless-stopped
     environment:
       IPFS_PROFILE: "server,pebbleds"
+      GOLOG_LOG_LEVEL: "info"
     volumes:
       - ipfs_data:/data/ipfs
     ports:
