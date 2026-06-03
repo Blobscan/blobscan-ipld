@@ -10,7 +10,7 @@ is needed. Variables that are unset or empty fall back to the listed default.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `NETWORK_NAME` | **yes** | — | Network identifier: `mainnet`, `sepolia`, `gnosis`, `hoodi` |
-| `BEACON_RPC` | conditional | `""` | Beacon Node REST API base URL. Required for `run` / `epoch` subcommands; not needed for `serve` |
+| `BEACON_RPC` | conditional | `""` | Beacon Node REST API base URL (set by compose files from network-specific `{MAINNET,SEPOLIA,HOODI}_BEACON_RPC`). Required for `run` / `epoch` subcommands; not needed for `serve` |
 | `BEACON_TIMEOUT` | no | `60s` | HTTP request timeout for all Beacon Node API calls |
 | `BEACON_RATE_LIMIT` | no | `100` | Max requests/second to beacon RPC. Set to ~80-90% of provider limit (Quicknode: 125 req/s → use `100`) |
 | `BEACON_RATE_BURST` | no | `10` | Token bucket burst size. Controls how many requests can fire at once |

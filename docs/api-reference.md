@@ -6,12 +6,9 @@ All exported symbols across every package. Internal helpers are omitted.
 
 ## Package `config`
 
-### `func Load(path string) (*Config, error)`
-Reads a YAML file at `path`, then (in order): applies environment variable
-overrides (`NETWORK_NAME`, `BEACON_RPC`, `POSTGRES_DSN`, `IPFS_API_ADDR`),
-validates required fields, and fills in defaults. Returns a `*Config`. Returns
-an error if the file cannot be read, the YAML is malformed, or any required
-field is missing after overrides.
+### `func Load() (*Config, error)`
+Loads environment variables and validates them. Returns a `*Config`. Returns
+an error if any required field is missing or validation fails.
 
 ### `func dencunEpoch(network string) (uint64, bool)`
 Returns the first epoch that contains blob sidecars for the given network name.

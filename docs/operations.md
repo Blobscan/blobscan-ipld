@@ -70,7 +70,7 @@ cp .env.example .env
 | Variable | Description |
 |----------|-------------|
 | `POSTGRES_PASSWORD` | Password for the `blobscan` PostgreSQL user |
-| `BEACON_RPC` | Beacon node REST API URL for mainnet |
+| `MAINNET_BEACON_RPC` | Beacon node REST API URL for mainnet |
 | `SEPOLIA_BEACON_RPC` | Beacon node REST API URL for Sepolia |
 
 **Mainnet:**
@@ -402,7 +402,7 @@ Minimum required variables:
 
 ```bash
 NETWORK_NAME=mainnet
-BEACON_RPC=http://localhost:5052
+MAINNET_BEACON_RPC=http://localhost:5052
 IPFS_API_ADDR=/ip4/127.0.0.1/tcp/5001
 DATA_DIR=/var/lib/blobscan-ipld/mainnet
 POSTGRES_DSN=postgres://user:pass@localhost:5432/blobscan  # optional

@@ -14,7 +14,7 @@ self-contained CAR v2 archives, and publishes a mutable network root via IPNS.
 go build ./cmd/blobscan-ipld
 
 # 2. Set required environment variables
-cp .env.example .env   # edit NETWORK_NAME, BEACON_RPC, DATA_DIR, IPFS_API_ADDR
+cp .env.example .env   # edit NETWORK_NAME, {MAINNET,SEPOLIA,HOODI}_BEACON_RPC, DATA_DIR, IPFS_API_ADDR
 
 # 3. Run (beacon-pull mode)
 export $(grep -v '^#' .env | xargs)
@@ -119,7 +119,7 @@ default. Minimum required environment variables:
 
 ```bash
 NETWORK_NAME=mainnet
-BEACON_RPC=http://localhost:5052   # omit when using push API only
+MAINNET_BEACON_RPC=http://localhost:5052   # omit when using push API only
 IPFS_API_ADDR=/ip4/127.0.0.1/tcp/5001
 DATA_DIR=/var/lib/blobscan-ipld/mainnet
 POSTGRES_DSN=postgres://user:pass@localhost:5432/blobscan  # optional

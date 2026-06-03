@@ -21,13 +21,12 @@ the `types` package, keeping the dependency graph acyclic and easy to test.
 ## Packages
 
 ### `config`
-Loads and validates a YAML configuration file. After parsing, applies
-environment variable overrides (`NETWORK_NAME`, `BEACON_RPC`, `POSTGRES_DSN`)
-and then fills in defaults for any optional fields that are still unset.
-The `start_epoch` default is resolved from a built-in table of Deneb fork
-epochs keyed by network name (mainnet, sepolia, gnosis, hoodi), so callers do
-not need to know the correct epoch number. Validation fails fast at startup
-with a clear error message rather than panicking at runtime.
+Loads and validates environment variables. Fills in defaults for any optional
+fields that are still unset. The `start_epoch` default is resolved from a
+built-in table of Deneb fork epochs keyed by network name (mainnet, sepolia,
+gnosis, hoodi), so callers do not need to know the correct epoch number.
+Validation fails fast at startup with a clear error message rather than
+panicking at runtime.
 
 ### `types`
 Plain Go structs with no external dependencies beyond `go-cid`. Defines:

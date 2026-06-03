@@ -48,7 +48,7 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       NETWORK_NAME: mainnet
-      BEACON_RPC: "${BEACON_RPC:?BEACON_RPC is required}"
+      BEACON_RPC: "${MAINNET_BEACON_RPC:?MAINNET_BEACON_RPC is required}"
       BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
       BEACON_RATE_BURST: "10"
       BEACON_429_BACKOFF: "1s"

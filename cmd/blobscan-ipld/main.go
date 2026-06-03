@@ -48,7 +48,7 @@ Global flags (before subcommand):
   -log-level <level>  Log level: debug, info, warn, error (default: info)
 
 Environment variables:
-  NETWORK_NAME, BEACON_RPC, DATA_DIR, IPFS_API_ADDR, POSTGRES_DSN, ...
+  NETWORK_NAME, {MAINNET,SEPOLIA,HOODI}_BEACON_RPC, DATA_DIR, IPFS_API_ADDR, POSTGRES_DSN, ...
   See docs/configuration.md for the full list.
 
 Examples:
