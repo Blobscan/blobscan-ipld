@@ -129,79 +129,147 @@ tagged releases.
 
 ---
 
-## IPFS node setup (Kubo + Badger)
+## IPFS node setup (Kubo + Pebble)
 
 Kubo (the reference IPFS implementation) supports pluggable datastores. For
-blob-heavy workloads, **Badger** is strongly recommended over the default
-`flatfs` because it handles large numbers of small-to-medium blocks much more
-efficiently (better write throughput, less filesystem inode pressure).
+blob-heavy workloads, **Pebble** is strongly recommended over both the
+default `flatfs` and the legacy `badgerds` plugin. Pebble is CockroachDB's
+production-grade LSM-tree key/value store (a RocksDB-style engine written in
+Go), exposed to Kubo as the `pebbleds` plugin.
 
-### 1. Install Kubo with Badger support
+### Why Pebble (vs. the default `flatfs`)
 
-The standard `ipfs` binary does **not** include the Badger plugin — it must be
-compiled in. The easiest path is the official `kubo` build with plugins:
+`flatfs` stores every IPFS block as an individual file in a sharded
+directory tree. That model breaks down quickly at the scale this indexer
+produces (millions of ~128 KiB blob blocks per network). Pebble packs the
+same data into a small number of large SST files and gives you, in addition:
+
+- **Far higher write throughput.** Pebble's LSM-tree absorbs the generator's
+  steady stream of block writes in batched, sequential I/O. `flatfs` issues
+  one `open`/`write`/`fsync`/`close` syscall per block — orders of magnitude
+  more filesystem work for the same payload.
+- **No million-files problem.** `flatfs` pressures the filesystem with
+  millions of small files: inode exhaustion, slow directory listings, slow
+  backups/rsync, and a metadata cache that no longer fits in RAM. Pebble
+  stores blocks inside a handful of large SST files, so the filesystem only
+  sees a few dozen entries no matter how many blocks you've indexed.
+- **Much smaller on-disk footprint per block.** `flatfs` pays a full
+  filesystem-block (typically 4 KiB) of overhead for every IPFS block plus
+  per-file inode/metadata cost. Pebble amortises both across SSTs.
+- **Continuous background compaction with no manual tuning.** Pebble
+  auto-tunes its level structure and compacts in the background. Read and
+  write amplification stay bounded as the repo grows into the tens of GiB —
+  there is no equivalent of "the directory got too big" with `flatfs`.
+- **Configurable block cache for read-heavy queries.** `flatfs` relies
+  entirely on the OS page cache. Pebble exposes a dedicated block cache
+  (`cacheSize`) you can size for the indexer's hot set, so repeated reads
+  of recent epochs stay in memory.
+- **Crash-safe with fast recovery.** The Pebble WAL guarantees durability;
+  recovery is a short log replay rather than a full directory rescan.
+- **Faster shutdown and startup.** No per-file `fsync` storms on shutdown;
+  no directory-walk cost on startup.
+
+### Why Pebble (vs. `badgerds`)
+
+`badgerds` is also an LSM-tree, so it shares Pebble's broad advantages over
+`flatfs`. The reasons to prefer Pebble specifically:
+
+- **Actively maintained and the supported choice in Kubo.** `badgerds` has
+  been deprecated in Kubo and is no longer recommended for new deployments;
+  `pebbleds` is the maintained replacement. Picking it now avoids a forced
+  datastore change later.
+- **More predictable write latency under sustained load.** Badger's
+  value-log architecture introduces periodic GC pauses that can stall writes
+  on a continuously-ingesting indexer. Pebble's level-based compaction is
+  smoother and avoids the value-log step entirely.
+- **No value-log GC to tune.** Badger requires periodic `RunValueLogGC` to
+  reclaim space in its value log; if it's skipped, on-disk size drifts
+  upward. Pebble reclaims space automatically as part of normal compaction.
+- **Lower steady-state memory footprint** for the same hot-set size, with
+  Pebble's block cache giving finer control over the memory/read-hit-rate
+  trade-off than Badger's table/value caches.
+- **Faster, more reliable crash recovery.** Long-running `badgerds` repos
+  are prone to slow index rebuilds (and occasional corruption) after an
+  unclean shutdown. Pebble's WAL replay is short and well-tested.
+- **Smaller, simpler on-disk format.** Pebble does not split data between an
+  SST tree and a separate value log, which keeps backups and disk-usage
+  accounting straightforward.
+
+### Docker Compose users
+
+The Compose files in this repo apply the `server,pebbleds` Kubo profiles
+automatically on first init via `IPFS_PROFILE`. No manual steps are required
+for a fresh deployment — skip to [Initial setup](#initial-setup).
+
+> **Note:** Kubo profiles are only applied when the repo is *first*
+> initialised. Use a fresh data volume so the `pebbleds` profile takes effect.
+
+### 1. Install Kubo with Pebble support
+
+The `pebbleds` plugin ships in the default Kubo build from v0.31.0 onward —
+no custom build is required. Download a release from
+<https://github.com/ipfs/kubo/releases>:
 
 ```bash
-# Option A: download a pre-built release that includes the badger plugin
-# Check https://github.com/ipfs/kubo/releases for the latest version
-wget https://github.com/ipfs/kubo/releases/download/v0.27.0/kubo_v0.27.0_linux-amd64.tar.gz
-tar -xzf kubo_v0.27.0_linux-amd64.tar.gz
+wget https://github.com/ipfs/kubo/releases/download/v0.32.1/kubo_v0.32.1_linux-amd64.tar.gz
+tar -xzf kubo_v0.32.1_linux-amd64.tar.gz
 sudo bash kubo/install.sh
 ipfs version
-```
-
-```bash
-# Option B: build from source with the badger plugin enabled
-git clone https://github.com/ipfs/kubo.git
-cd kubo
-# Enable the badger plugin in plugin/loader/preload_list:
-echo "badgerds github.com/ipfs/kubo/plugin/plugins/badgerds *" >> plugin/loader/preload_list
-make build
-sudo cp cmd/ipfs/ipfs /usr/local/bin/ipfs
 ```
 
 Verify the plugin is available:
 
 ```bash
 ipfs plugin ls
-# Should include: badgerds (datastore)
+# Should include: pebbleds (datastore)
 ```
 
-### 2. Initialise the IPFS repo with Badger
+### 2. Initialise the IPFS repo with Pebble
+
+Apply the `server` and `pebbleds` profiles at init time:
 
 ```bash
-# Initialise a fresh repo (skip if you already have one)
-ipfs init --profile=server
+ipfs init --profile=server,pebbleds
 ```
 
-After initialisation, replace the datastore config. Edit
-`~/.ipfs/config` (or `$IPFS_PATH/config`) and replace the entire
-`"Datastore"` section:
+This produces a `Datastore.Spec` section like:
 
 ```json
 "Datastore": {
-  "StorageMax": "100GB",
+  "StorageMax": "10GB",
   "StorageGCWatermark": 90,
   "GCPeriod": "1h",
   "Spec": {
-    "type": "measure",
-    "prefix": "badger.datastore",
-    "child": {
-      "type": "badgerds",
-      "path": "badgerds",
-      "syncWrites": false,
-      "truncate": true
-    }
+    "mounts": [
+      {
+        "child": {
+          "path": "pebbleds",
+          "type": "pebbleds"
+        },
+        "mountpoint": "/blocks",
+        "prefix": "pebble.datastore",
+        "type": "measure"
+      },
+      {
+        "child": {
+          "compression": "none",
+          "path": "datastore",
+          "type": "levelds"
+        },
+        "mountpoint": "/",
+        "prefix": "leveldb.datastore",
+        "type": "measure"
+      }
+    ],
+    "type": "mount"
   },
   "HashOnRead": false,
   "BloomFilterSize": 0
 }
 ```
 
-> **`syncWrites: false`** gives significantly better write throughput at the
-> cost of a small risk of data loss on a hard crash. For an indexer that can
-> always re-fetch data from the beacon node this is an acceptable trade-off.
-> Set to `true` if you need strict durability.
+Raise `StorageMax` to match the disk you've allocated (e.g. `100GB` or more
+for mainnet).
 
 ### 3. Configure the API and Gateway (optional)
 
@@ -219,34 +287,29 @@ by the generator:
 }
 ```
 
-### 4. Tune Badger for large block workloads
+### 4. Tune Pebble for large block workloads (optional)
 
-Add a `"Datastore"` → `"Params"` section (Kubo passes these through to the
-Badger options):
+The `pebbleds` plugin works well out of the box. Pebble auto-tunes most
+parameters from the workload, so manual tuning is rarely needed. The few knobs
+exposed by Kubo can be set in `Datastore.Spec.mounts[0].child`:
 
 ```json
-"Spec": {
-  "type": "measure",
-  "prefix": "badger.datastore",
-  "child": {
-    "type": "badgerds",
-    "path": "badgerds",
-    "syncWrites": false,
-    "truncate": true,
-    "vlogFileSize": 1073741824,
-    "valueThreshold": 1024,
-    "numVersionsToKeep": 1,
-    "maxTableSize": 67108864
-  }
+{
+  "path": "pebbleds",
+  "type": "pebbleds",
+  "cacheSize": 1073741824,
+  "formatMajorVersion": 0,
+  "disableWAL": false
 }
 ```
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `vlogFileSize` | `1073741824` (1 GiB) | Larger value log files reduce GC pressure for large blobs |
-| `valueThreshold` | `1024` | Values ≥ 1 KiB go to the value log; raw 128 KiB blobs always go there |
-| `numVersionsToKeep` | `1` | No MVCC history needed; saves space |
-| `maxTableSize` | `67108864` (64 MiB) | Larger SST tables improve compaction efficiency |
+| `cacheSize` | `1073741824` (1 GiB) | Larger block cache improves read hit rate for hot epochs |
+| `disableWAL` | `false` | Keep crash safety on; the generator's pipeline already batches writes |
+| `formatMajorVersion` | `0` | Use the latest format Pebble supports; bump only on advice from Pebble release notes |
+
+For most deployments leaving the defaults is fine.
 
 ### 6. Start the IPFS daemon
 
@@ -297,7 +360,7 @@ ipfs key gen --type=ed25519 blobscan-mainnet
 # → k51qzi5uqu5d...
 ```
 
-### Badger maintenance
+### Pebble maintenance
 
 ```bash
 # Run garbage collection manually (removes unreferenced blocks)
@@ -305,17 +368,17 @@ ipfs repo gc
 
 # Check repo size
 ipfs repo stat
-
-# Badger compaction runs automatically; to force it:
-# Stop the daemon, then:
-ipfs repo gc --stream-errors
 ```
+
+Pebble runs background compactions continuously; there is no manual
+compaction command to invoke. If repo size grows unexpectedly, check for
+unreferenced blocks with `ipfs repo gc` and review pinned roots.
 
 ---
 
 ## Initial setup
 
-> Before running the generator, complete the [IPFS node setup](#ipfs-node-setup-kubo--badger)
+> Before running the generator, complete the [IPFS node setup](#ipfs-node-setup-kubo--pebble)
 > section above. The IPNS key is created in step 8 of that section.
 
 ### 1. Create storage directories
