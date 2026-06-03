@@ -53,7 +53,8 @@ type EpochResult struct {
 
 // NetworkRootResult holds the CID of the rebuilt NetworkRoot node.
 type NetworkRootResult struct {
-	CID cid.Cid
+	CID       cid.Cid
+	PageCount int // number of EpochPage blocks in the paged structure
 }
 
 // ─── Persistent state ────────────────────────────────────────────────────────

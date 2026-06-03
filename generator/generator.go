@@ -900,7 +900,8 @@ func (g *Generator) rebuildNetworkRoot(ctx context.Context) error {
 	rootBS := store.NewMemBlockstore()
 	lsys := store.NewLinkSystem(rootBS)
 
-	rootResult, err := builder.BuildNetworkRoot(ctx, lsys, g.cfg.Network.Name, epochResults)
+	rootResult, err := builder.BuildNetworkRoot(ctx, lsys, g.cfg.Network.Name, epochResults,
+		g.cfg.Generator.NetworkRootPageSize)
 	if err != nil {
 		return fmt.Errorf("build network root: %w", err)
 	}
@@ -909,7 +910,8 @@ func (g *Generator) rebuildNetworkRoot(ctx context.Context) error {
 		return fmt.Errorf("upload network root to IPFS: %w", err)
 	}
 
-	g.log.Debug("network root rebuilt", "cid", rootResult.CID, "epochs", len(epochResults))
+	g.log.Debug("network root rebuilt", "cid", rootResult.CID, "epochs", len(epochResults),
+		"pages", rootResult.PageCount)
 	return nil
 }
 

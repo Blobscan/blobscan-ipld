@@ -53,13 +53,14 @@ type StorageConfig struct {
 
 // GeneratorConfig controls the DAG generation behaviour.
 type GeneratorConfig struct {
-	HAMTThreshold      int           `yaml:"hamt_threshold"`       // blobs per epoch before switching to HAMT
-	PollInterval       time.Duration `yaml:"poll_interval"`        // how often to check for new finalized epochs
-	StartEpoch         uint64        `yaml:"start_epoch"`          // first epoch to process (0 = genesis)
-	Workers            int           `yaml:"workers"`              // parallel blob-processing goroutines
-	BeaconWorkers      int           `yaml:"beacon_workers"`       // parallel slot fetches per epoch
-	SkipExistingEpochs bool          `yaml:"skip_existing_epochs"` // resume from last processed epoch
-	APIListen          string        `yaml:"api_listen"`           // address for the HTTP push API (e.g. ":8080"); empty = disabled
+	HAMTThreshold       int           `yaml:"hamt_threshold"`        // blobs per epoch before switching to HAMT
+	PollInterval        time.Duration `yaml:"poll_interval"`         // how often to check for new finalized epochs
+	StartEpoch          uint64        `yaml:"start_epoch"`           // first epoch to process (0 = genesis)
+	Workers             int           `yaml:"workers"`               // parallel blob-processing goroutines
+	BeaconWorkers       int           `yaml:"beacon_workers"`        // parallel slot fetches per epoch
+	SkipExistingEpochs  bool          `yaml:"skip_existing_epochs"`  // resume from last processed epoch
+	APIListen           string        `yaml:"api_listen"`            // address for the HTTP push API (e.g. ":8080"); empty = disabled
+	NetworkRootPageSize int           `yaml:"network_root_page_size"` // max epochs per NetworkRoot page (default 10000)
 }
 
 // Load reads and validates a YAML config file.
@@ -135,6 +136,11 @@ func (c *Config) applyEnvOverrides() {
 			c.Generator.BeaconWorkers = i
 		}
 	}
+	if v := os.Getenv("NETWORK_ROOT_PAGE_SIZE"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.Generator.NetworkRootPageSize = i
+		}
+	}
 	if v := os.Getenv("BLOBSCAN_API_URL"); v != "" {
 		c.Blobscan.APIURL = v
 	}
@@ -185,6 +191,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Generator.BeaconWorkers == 0 {
 		c.Generator.BeaconWorkers = 16
+	}
+	if c.Generator.NetworkRootPageSize == 0 {
+		c.Generator.NetworkRootPageSize = 10000
+	}
+	if c.Generator.NetworkRootPageSize < 1000 {
+		c.Generator.NetworkRootPageSize = 1000
 	}
 	if c.Storage.CARDir == "" {
 		c.Storage.CARDir = c.Storage.DataDir + "/car"

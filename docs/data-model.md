@@ -17,30 +17,35 @@ finalized and uploaded to IPFS. When an IPNS key is configured, the current
 `NetworkRoot` CID is also published under that key, giving consumers a stable
 `/ipns/<key>` pointer that always resolves to the latest state.
 
+Epochs are grouped into **pages** (intermediate `EpochPage` nodes) to keep
+every IPFS block under the 2 MiB limit. The root block itself is tiny (~300 B)
+regardless of how many epochs are indexed.
+
 **Source:** `builder.BuildNetworkRoot` in `builder/network.go`
 
 ### Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `type` | string | Always `"paged"` — version discriminator |
 | `network` | string | Network name, e.g. `"mainnet"`, `"sepolia"` |
 | `latestEpoch` | int | Highest epoch number in the index |
-| `epochCount` | int | Total number of epochs indexed |
-| `approximateSizeBytes` | int | Sum of `approximateSizeBytes` across all epochs |
-| `epochs` | map\<string, &EpochNode\> | Key: decimal epoch number string |
+| `totalSizeBytes` | int | Sum of `approximateSizeBytes` across all epochs |
+| `pageSize` | int | Maximum epoch entries per EpochPage (default `10000`) |
+| `pages` | map\<string, &EpochPage\> | Key: page-start epoch as decimal string |
 
 ### Example
 
 ```json
 {
+  "type": "paged",
   "network": "mainnet",
   "latestEpoch": 270000,
-  "epochCount": 432,
-  "approximateSizeBytes": 46789012345,
-  "epochs": {
-    "269568": { "/": "bafyreib2..." },
-    "269569": { "/": "bafyreic3..." },
-    "270000": { "/": "bafyreid4..." }
+  "totalSizeBytes": 46789012345,
+  "pageSize": 10000,
+  "pages": {
+    "260000": { "/": "bafyreia1..." },
+    "270000": { "/": "bafyreib2..." }
   }
 }
 ```
@@ -53,6 +58,38 @@ ipfs name resolve /ipns/k51q...
 
 # Fetch the NetworkRoot node
 ipfs dag get /ipns/k51q...
+```
+
+---
+
+## EpochPage
+
+An intermediate paging node that holds up to `pageSize` epoch entries for a
+contiguous range of epoch numbers. Pages are aligned to `pageSize` multiples:
+epoch `e` belongs to the page starting at `(e / pageSize) * pageSize`.
+
+Completed pages (where all `pageSize` slots are in the past) are **immutable**
+and their CID never changes. Only the tail page is rewritten on each epoch
+update.
+
+**Source:** `builder.buildEpochPage` in `builder/network.go`
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `epochs` | map\<string, &EpochNode\> | Key: decimal epoch number string |
+
+### Example
+
+```json
+{
+  "epochs": {
+    "269568": { "/": "bafyreib2..." },
+    "269569": { "/": "bafyreic3..." },
+    "270000": { "/": "bafyreid4..." }
+  }
+}
 ```
 
 ---
@@ -232,11 +269,16 @@ The canonical schema is in `schema/schema.ipldsch`:
 
 ```
 type NetworkRoot struct {
-  network              String
-  epochs               {String : &EpochNode}
-  latestEpoch          Int
-  epochCount           Int
-  approximateSizeBytes Int
+  type             String
+  network          String
+  latestEpoch      Int
+  totalSizeBytes   Int
+  pageSize         Int
+  pages            {String : &EpochPage}
+}
+
+type EpochPage struct {
+  epochs  {String : &EpochNode}
 }
 
 type EpochNode struct {
@@ -283,19 +325,22 @@ type Blob bytes
 # Via IPNS (always resolves to the latest NetworkRoot)
 ipfs dag get /ipns/k51q.../
 
+# Get the page containing epoch 269568 (page start = 260000 with pageSize=10000)
+ipfs dag get /ipns/k51q.../pages/260000
+
 # Get a specific epoch via IPNS
-ipfs dag get /ipns/k51q.../epochs/269568
+ipfs dag get /ipns/k51q.../pages/260000/epochs/269568
 
 # Get a blob's metadata via IPNS (key = versionedHash; [0] = first occurrence)
-ipfs dag get /ipns/k51q.../epochs/269568/blobs/entries/0x01aabb…/0
+ipfs dag get /ipns/k51q.../pages/260000/epochs/269568/blobs/entries/0x01aabb…/0
 
 # Via direct CID (stable, immutable)
 # NetworkRoot CID is returned by the generator or: SELECT cid FROM ipld_epochs
 ipfs dag get <NetworkRootCID>
-ipfs dag get <NetworkRootCID>/epochs/269568
-ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0
+ipfs dag get <NetworkRootCID>/pages/260000/epochs/269568
+ipfs dag get <NetworkRootCID>/pages/260000/epochs/269568/blobs/entries/0x01aabb…/0
 
 # Follow the data link to the raw blob bytes
-ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0/data
+ipfs dag get <NetworkRootCID>/pages/260000/epochs/269568/blobs/entries/0x01aabb…/0/data
 ipfs block get bafkreibm...
 ```

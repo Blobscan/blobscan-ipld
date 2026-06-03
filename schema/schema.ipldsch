@@ -3,6 +3,26 @@
 ## Each epoch is exported as an independent self-contained CAR v2 file.
 ## The epoch CID and per-blob CIDs are persisted to PostgreSQL.
 
+# ─── Network Root ─────────────────────────────────────────────────────────────
+# Rebuilt after every epoch. Uses EpochPage nodes to keep every block under
+# the IPFS 2 MiB limit. Page-start keys are decimal strings aligned to
+# pageSize multiples (e.g. "260000", "270000" with pageSize=10000).
+type NetworkRoot struct {
+  type             String          # always "paged"
+  network          String
+  latestEpoch      Int
+  totalSizeBytes   Int
+  pageSize         Int
+  pages            {String : &EpochPage}
+}
+
+# ─── Epoch Page ───────────────────────────────────────────────────────────────
+# Holds up to pageSize epoch entries. Completed pages are immutable.
+# Epoch number keys are decimal strings (e.g. "269568").
+type EpochPage struct {
+  epochs  {String : &EpochNode}
+}
+
 # ─── Epoch Node ──────────────────────────────────────────────────────────────
 type EpochNode struct {
   epoch               Int

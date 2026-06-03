@@ -10,17 +10,20 @@ All map keys are sorted lexicographically to ensure deterministic CIDs.
 
 ```
 NetworkRoot (dag-cbor)
-└── epochs: { "269568" → &EpochNode, "269569" → &EpochNode, … }
+└── pages: { "260000" → &EpochPage, "270000" → &EpochPage, … }
                               │
-                         EpochNode (dag-cbor)
-                         └── blobs
-                               ├── BlobMap (dag-cbor, ≤ hamt_threshold blobs)
-                               │   └── entries: { "<versionedHash>" → [&BlobMetadata, …], … }
-                               └── HAMTRoot (dag-cbor, > hamt_threshold blobs)
-                                   └── shards: [ &HAMTShard, … ]
-                                                      │
-                                                 BlobMetadata (dag-cbor)
-                                                 └── data → &Blob (raw)
+                         EpochPage (dag-cbor)
+                         └── epochs: { "269568" → &EpochNode, … }
+                                                │
+                                           EpochNode (dag-cbor)
+                                           └── blobs
+                                                 ├── BlobMap (dag-cbor, ≤ hamt_threshold blobs)
+                                                 │   └── entries: { "<versionedHash>" → [&BlobMetadata, …], … }
+                                                 └── HAMTRoot (dag-cbor, > hamt_threshold blobs)
+                                                     └── shards: [ &HAMTShard, … ]
+                                                                        │
+                                                                   BlobMetadata (dag-cbor)
+                                                                   └── data → &Blob (raw)
 ```
 
 The `NetworkRoot` is rebuilt from scratch after **every** epoch is processed.
@@ -36,21 +39,55 @@ current state of the indexed network.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `type` | `String` | Always `"paged"` — version discriminator |
 | `network` | `String` | Network name, e.g. `"mainnet"` |
 | `latestEpoch` | `Int` | Highest epoch number indexed so far |
 | `totalSizeBytes` | `Int` | Approximate cumulative blob data size |
-| `epochs` | `{String : &EpochNode}` | Map from epoch number (decimal string) to EpochNode CID |
+| `pageSize` | `Int` | Maximum epoch entries per EpochPage (default `10000`) |
+| `pages` | `{String : &EpochPage}` | Map from page-start epoch (decimal string) to EpochPage CID |
 
-**Key design:** Epoch numbers are stored as decimal strings (e.g. `"269568"`)
-rather than integers so the map can be traversed with standard IPLD path
-selectors (`/epochs/269568`).
+**Page alignment:** Each page covers epochs `[pageStart, pageStart + pageSize)`.
+The page-start key for epoch `e` is `(e / pageSize) * pageSize` (integer
+division). For example, with `pageSize=10000`, epochs 0–9999 belong to page
+`"0"`, epochs 10000–19999 to page `"10000"`, etc.
+
+**Why paging?** A flat `epochs` map of 50 000 entries would be ~2.3 MB — over
+Kubo's 2 MiB per-block limit. Paging keeps every block well under the limit
+(each page ≈ 460 KB at `pageSize=10000`; the root itself is only ~300 bytes).
+Completed pages are immutable (their CID never changes once the page is full).
 
 **Example (JSON-equivalent):**
 ```json
 {
+  "type": "paged",
   "network": "mainnet",
   "latestEpoch": 269570,
   "totalSizeBytes": 11010048,
+  "pageSize": 10000,
+  "pages": {
+    "260000": { "/": "bafyreia..." }
+  }
+}
+```
+
+---
+
+## EpochPage
+
+**Codec:** dag-cbor  
+**CID hash:** sha2-256
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `epochs` | `{String : &EpochNode}` | Map from epoch number (decimal string) to EpochNode CID |
+
+**Key design:** Epoch numbers are stored as decimal strings (e.g. `"269568"`)
+rather than integers so the map can be traversed with standard IPLD path
+selectors (`/pages/260000/epochs/269568`).
+
+**Example (JSON-equivalent):**
+```json
+{
   "epochs": {
     "269568": { "/": "bafyreib..." },
     "269569": { "/": "bafyreic..." },
@@ -229,7 +266,8 @@ since the Cancun hard fork.
 | BlobMetadata nodes | 17 000 000 × 503 B | **~8.1 GB** |
 | EpochNode map entries | 17 000 000 × 134 B | **~2.2 GB** |
 | EpochNode headers (~50k epochs) | 50 000 × 200 B | **~9.7 MB** |
-| NetworkRoot node | ~50 000 entries × 46 B + header | **~2.3 MB** |
+| NetworkRoot node | ~5 pages × 60 B + header | **~300 B** |
+| EpochPage nodes (~5 pages) | ~10 000 entries × 46 B each | **~460 KB each** |
 | **Total metadata** | | **~10.3 GB** |
 | **Total (data + metadata)** | | **~2.09 TB** |
 
@@ -309,17 +347,20 @@ for projections, giving:
 
 ### NetworkRoot growth
 
-The `NetworkRoot` node holds one CID link per epoch (~46 bytes each).
+The `NetworkRoot` uses epoch **pages** so the root block stays tiny regardless
+of how many epochs are indexed. Each `EpochPage` holds up to `pageSize`
+(default 10 000) epoch entries (~46 bytes each).
 
 ```
-After 1 year  : 81 000 epochs × 46 B ≈  3.6 MB  (single node, in-memory trivial)
-After 5 years : 405 000 epochs × 46 B ≈ 18 MB   (still a single dag-cbor node)
+Root block        : ~300 B at any scale  (one entry per page)
+Per EpochPage     : pageSize × 46 B ≈ 460 KB at pageSize=10 000
+
+After 1 year  : ~8 pages × 460 KB  ≈ 3.6 MB total page data (every block < 2 MiB ✓)
+After 5 years : ~41 pages × 460 KB ≈ 18 MB total page data  (every block < 2 MiB ✓)
 ```
 
-A single dag-cbor map with 405 000 entries is large but manageable. At
->500 000 entries it may be worth sharding the `NetworkRoot` similarly to how
-the blob index uses HAMT — however that is not expected to be necessary within
-a 5-year horizon at current rates.
+Completed pages are **immutable** — their CID never changes once the epoch
+window is full — so only the tail page is rewritten on each epoch update.
 
 ### EIP-7594 (PeerDAS) impact
 
@@ -361,6 +402,7 @@ node would reach ~18 MB after one year and would benefit from sharding after
 | Node type | Codec | Hash |
 |-----------|-------|------|
 | `NetworkRoot` | dag-cbor (`0x71`) | sha2-256 |
+| `EpochPage` | dag-cbor (`0x71`) | sha2-256 |
 | `EpochNode` | dag-cbor (`0x71`) | sha2-256 |
 | `BlobMetadata` | dag-cbor (`0x71`) | sha2-256 |
 | `HAMTShard` | dag-cbor (`0x71`) | sha2-256 |
@@ -375,7 +417,9 @@ All CIDs are CIDv1.
 Given identical inputs, all CIDs are reproducible:
 
 - Map keys are always sorted lexicographically before encoding.
-- Epoch numbers in `NetworkRoot.epochs` are sorted numerically.
+- Page-start keys in `NetworkRoot.pages` and epoch keys in `EpochPage.epochs`
+  are both decimal strings sorted numerically (which equals lex order for
+  fixed-length zero-padded-free decimal numbers at current scales).
 - Blob index keys (versionedHash) are sorted lexicographically; the
   occurrence list for each key is ordered by `(slot, index)`.
 - The `raw` codec for blob data means the blob CID equals the content hash.
@@ -388,14 +432,17 @@ Given identical inputs, all CIDs are reproducible:
 # Get the NetworkRoot for a running IPFS node
 ipfs dag get <NetworkRootCID>
 
+# Navigate to the page containing epoch 269568 (page start = 260000 with pageSize=10000)
+ipfs dag get <NetworkRootCID>/pages/260000
+
 # Navigate to a specific epoch
-ipfs dag get <NetworkRootCID>/epochs/269568
+ipfs dag get <NetworkRootCID>/pages/260000/epochs/269568
 
 # Get a blob's metadata by versionedHash ([0] = first occurrence)
-ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0
+ipfs dag get <NetworkRootCID>/pages/260000/epochs/269568/blobs/entries/0x01aabb…/0
 
 # Get the raw blob data CID
-ipfs dag get <NetworkRootCID>/epochs/269568/blobs/entries/0x01aabb…/0/data
+ipfs dag get <NetworkRootCID>/pages/260000/epochs/269568/blobs/entries/0x01aabb…/0/data
 
 # Fetch raw blob bytes
 ipfs block get <BlobCID>
