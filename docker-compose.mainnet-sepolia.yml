@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: blobscan
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ipld_mainnet
+      POSTGRES_MULTIPLE_DATABASES: ipld_sepolia
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blobscan -d ipld_mainnet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ipfs:
+    image: ipfs/kubo:latest
+    restart: unless-stopped
+    environment:
+      IPFS_PROFILE: "server,pebbleds"
+    volumes:
+      - ipfs_data:/data/ipfs
+    ports:
+      - "4001:4001"
+      - "127.0.0.1:5001:5001"
+      - "127.0.0.1:8081:8080"
+    healthcheck:
+      test: ["CMD", "ipfs", "id"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mainnet:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/etc/blobscan-ipld/config.yaml:ro
+      - mainnet_data:/data
+      - mainnet_car:/car
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      NETWORK_NAME: mainnet
+      BEACON_RPC: "${MAINNET_BEACON_RPC:?MAINNET_BEACON_RPC is required}"
+      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      BEACON_RATE_BURST: "10"
+      BEACON_429_BACKOFF: "1s"
+      POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_mainnet?sslmode=disable"
+      IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
+    command: ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
+
+  sepolia:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/etc/blobscan-ipld/config.yaml:ro
+      - sepolia_data:/data
+      - sepolia_car:/car
+    ports:
+      - "127.0.0.1:8079:8080"
+    environment:
+      NETWORK_NAME: sepolia
+      BEACON_RPC: "${SEPOLIA_BEACON_RPC:?SEPOLIA_BEACON_RPC is required}"
+      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      BEACON_RATE_BURST: "10"
+      BEACON_429_BACKOFF: "1s"
+      POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_sepolia?sslmode=disable"
+      IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
+    command: ["-config", "/etc/blobscan-ipld/config.yaml", "run"]
+
+volumes:
+  postgres_data:
+  ipfs_data:
+  mainnet_data:
+  mainnet_car:
+  sepolia_data:
+  sepolia_car:
