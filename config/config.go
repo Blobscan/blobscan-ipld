@@ -51,14 +51,15 @@ type StorageConfig struct {
 
 // GeneratorConfig controls the DAG generation behaviour.
 type GeneratorConfig struct {
-	HAMTThreshold       int           // blobs per epoch before switching to HAMT
-	PollInterval        time.Duration // how often to check for new finalized epochs
-	StartEpoch          uint64        // first epoch to process (0 = genesis)
-	Workers             int           // parallel blob-processing goroutines
-	BeaconWorkers       int           // parallel slot fetches per epoch
-	SkipExistingEpochs  bool          // resume from last processed epoch
-	APIListen           string        // address for the HTTP push API (e.g. ":8080"); empty = disabled
-	NetworkRootPageSize int           // max epochs per NetworkRoot page (default 10000)
+	HAMTThreshold        int           // blobs per epoch before switching to HAMT
+	PollInterval         time.Duration // how often to check for new finalized epochs
+	StartEpoch           uint64        // first epoch to process (0 = genesis)
+	Workers              int           // parallel blob-processing goroutines
+	BeaconWorkers        int           // parallel slot fetches per epoch
+	BackfillEpochWorkers int           // parallel epoch builders in the backfill pipeline (default 4)
+	SkipExistingEpochs   bool          // resume from last processed epoch
+	APIListen            string        // address for the HTTP push API (e.g. ":8080"); empty = disabled
+	NetworkRootPageSize  int           // max epochs per NetworkRoot page (default 10000)
 }
 
 // Load builds a Config entirely from environment variables and built-in defaults.
@@ -132,6 +133,11 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("GENERATOR_BEACON_WORKERS"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			c.Generator.BeaconWorkers = i
+		}
+	}
+	if v := os.Getenv("BACKFILL_EPOCH_WORKERS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.Generator.BackfillEpochWorkers = i
 		}
 	}
 	if v := os.Getenv("GENERATOR_POLL_INTERVAL"); v != "" {
@@ -214,6 +220,9 @@ func (c *Config) applyDefaults() {
 	if c.Generator.BeaconWorkers == 0 {
 		c.Generator.BeaconWorkers = 16
 	}
+	if c.Generator.BackfillEpochWorkers == 0 {
+		c.Generator.BackfillEpochWorkers = 4
+	}
 	if c.Generator.NetworkRootPageSize == 0 {
 		c.Generator.NetworkRootPageSize = 10000
 	}
@@ -233,7 +242,7 @@ func (c *Config) applyDefaults() {
 		c.Network.BeaconRateLimit = 100 // req/s
 	}
 	if c.Network.BeaconRateBurst == 0 {
-		c.Network.BeaconRateBurst = 10
+		c.Network.BeaconRateBurst = 32
 	}
 	if c.Network.Beacon429Backoff == 0 {
 		c.Network.Beacon429Backoff = 1 * time.Second

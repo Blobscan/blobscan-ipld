@@ -347,7 +347,8 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 // cursor.
 func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uint64) error {
 	total := int(targetEpoch-startEpoch) + 1
-	g.log.Info(fmt.Sprintf("⟲ Backfill: %d epochs [%d → %d]", total, startEpoch, targetEpoch))
+	g.log.Info(fmt.Sprintf("⟲ Backfill: %d epochs [%d → %d]", total, startEpoch, targetEpoch),
+		"epoch_workers", g.cfg.Generator.BackfillEpochWorkers)
 
 	batchStart := time.Now()
 	next := startEpoch
@@ -384,6 +385,12 @@ func (g *Generator) runBackfill(ctx context.Context, startEpoch, targetEpoch uin
 // returns (lastEpochProcessed+1, nil) on full completion or (resumePoint, err)
 // on failure so the caller can retry from where the consumer last advanced
 // the cursor.
+//
+// Multiple producer goroutines (BackfillEpochWorkers) build epochs in parallel.
+// A dispatcher assigns epochs in order and results are collected into a reorder
+// buffer so the single-threaded consumer still persists and advances the cursor
+// monotonically. The beacon rate limiter is shared across all workers, so the
+// configured BEACON_RATE_LIMIT is never exceeded regardless of worker count.
 func (g *Generator) runBackfillPipeline(
 	ctx context.Context,
 	from, targetEpoch, startEpoch uint64,
@@ -399,76 +406,162 @@ func (g *Generator) runBackfillPipeline(
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Buffer of 2 is enough to hide upload+DB latency behind the next fetch
-	// without letting the producer race far ahead and waste work if the
-	// consumer errors.
-	pending := make(chan job, 2)
+	workers := g.cfg.Generator.BackfillEpochWorkers
+	if workers <= 0 {
+		workers = 1
+	}
+
+	// The ordered channel delivers results to the consumer in epoch order.
+	// Buffer enough to keep all workers busy plus one for the dispatcher.
+	pending := make(chan job, workers+1)
 
 	// Track the last epoch the consumer successfully persisted (or skipped via
 	// EpochExists), so on error we can resume from the right place.
 	var nextResume uint64 = from
 
-	// Producer: build epochs in order and push them onto `pending`.
+	// ── Dispatcher + worker pool ──────────────────────────────────────────
+	//
+	// The dispatcher sends epoch numbers to a work channel; workers pick them
+	// up, call buildEpoch, and send results to per-epoch slots in a reorder
+	// map. A separate collector goroutine drains the reorder map in order and
+	// pushes jobs onto the `pending` channel for the consumer.
+	//
+	// This ensures:
+	//   1. Up to `workers` buildEpoch calls run concurrently.
+	//   2. The consumer sees results in strict epoch order.
+	//   3. On error, the pipeline tears down quickly via context cancellation.
+
+	type buildResult struct {
+		epoch uint64
+		be    builtEpoch
+		err   error
+	}
+
+	workCh := make(chan uint64, workers)
+	resultCh := make(chan buildResult, workers)
+
+	// Workers: each picks epochs from workCh and builds them.
+	var workerWg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		workerWg.Add(1)
+		go func() {
+			defer workerWg.Done()
+			for epoch := range workCh {
+				if pctx.Err() != nil {
+					resultCh <- buildResult{epoch: epoch, err: pctx.Err()}
+					return
+				}
+
+				// Skip epochs already saved in the DB.
+				if g.db != nil {
+					exists, err := g.db.EpochExists(pctx, epoch)
+					if err != nil {
+						resultCh <- buildResult{epoch: epoch, err: fmt.Errorf("backfill: check epoch %d: %w", epoch, err)}
+						return
+					}
+					if exists {
+						resultCh <- buildResult{epoch: epoch, be: builtEpoch{epoch: epoch, empty: true}}
+						continue
+					}
+				}
+
+				p := &epochProgress{
+					idx:        int(epoch - startEpoch),
+					total:      total,
+					batchStart: batchStart,
+					src:        "backfill",
+				}
+				be, err := g.buildEpoch(pctx, epoch, p)
+				resultCh <- buildResult{epoch: epoch, be: be, err: err}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	// Dispatcher: sends epochs to workers, then waits for all workers to finish.
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		for epoch := from; epoch <= targetEpoch; epoch++ {
+			select {
+			case workCh <- epoch:
+			case <-pctx.Done():
+				close(workCh)
+				return
+			}
+		}
+		close(workCh)
+		workerWg.Wait()
+		close(resultCh)
+	}()
+
+	// Collector: reorders results and pushes them onto `pending` in epoch order.
 	producerDone := make(chan error, 1)
 	go func() {
 		defer close(pending)
-		for epoch := from; epoch <= targetEpoch; epoch++ {
-			if pctx.Err() != nil {
-				producerDone <- pctx.Err()
-				return
-			}
+		reorder := make(map[uint64]buildResult)
+		nextExpected := from
 
-			// Skip epochs already saved in the DB. The consumer still advances
-			// the cursor for these via the job channel so ordering is preserved.
-			if g.db != nil {
-				exists, err := g.db.EpochExists(pctx, epoch)
-				if err != nil {
-					producerDone <- fmt.Errorf("backfill: check epoch %d: %w", epoch, err)
+		for r := range resultCh {
+			reorder[r.epoch] = r
+
+			// Flush contiguous results in order.
+			for {
+				res, ok := reorder[nextExpected]
+				if !ok {
+					break
+				}
+				delete(reorder, nextExpected)
+
+				j := job{epoch: res.epoch, be: res.be, err: res.err}
+				select {
+				case pending <- j:
+				case <-pctx.Done():
+					producerDone <- pctx.Err()
 					return
 				}
-				if exists {
-					select {
-					case pending <- job{epoch: epoch, be: builtEpoch{epoch: epoch, empty: true}}:
-					case <-pctx.Done():
-						producerDone <- pctx.Err()
-						return
-					}
-					continue
+				if res.err != nil {
+					producerDone <- nil
+					return
 				}
+				nextExpected++
 			}
+		}
 
-			p := &epochProgress{
-				idx:        int(epoch - startEpoch),
-				total:      total,
-				batchStart: batchStart,
-				src:        "backfill",
+		// Flush any remaining reordered results (all workers finished).
+		for nextExpected <= targetEpoch {
+			res, ok := reorder[nextExpected]
+			if !ok {
+				break
 			}
-			be, err := g.buildEpoch(pctx, epoch, p)
-			if err != nil {
-				select {
-				case pending <- job{epoch: epoch, err: err}:
-				case <-pctx.Done():
-				}
-				producerDone <- nil
-				return
-			}
+			delete(reorder, nextExpected)
+
+			j := job{epoch: res.epoch, be: res.be, err: res.err}
 			select {
-			case pending <- job{epoch: epoch, be: be}:
+			case pending <- j:
 			case <-pctx.Done():
 				producerDone <- pctx.Err()
 				return
 			}
+			if res.err != nil {
+				producerDone <- nil
+				return
+			}
+			nextExpected++
 		}
+
 		producerDone <- nil
 	}()
 
-	// Consumer: persist epochs in order, advance the cursor.
+	// ── Consumer: persist epochs in order, advance the cursor ─────────────
 	for j := range pending {
 		if j.err != nil {
 			cancel()
-			// Drain so the producer goroutine can exit.
 			for range pending {
 			}
+			<-dispatchDone
 			<-producerDone
 			return nextResume, j.err
 		}
@@ -476,6 +569,7 @@ func (g *Generator) runBackfillPipeline(
 			cancel()
 			for range pending {
 			}
+			<-dispatchDone
 			<-producerDone
 			return nextResume, fmt.Errorf("backfill: persist epoch %d: %w", j.epoch, err)
 		}
@@ -483,12 +577,14 @@ func (g *Generator) runBackfillPipeline(
 			cancel()
 			for range pending {
 			}
+			<-dispatchDone
 			<-producerDone
 			return nextResume, fmt.Errorf("backfill: set cursor %d: %w", j.epoch, err)
 		}
 		nextResume = j.epoch + 1
 	}
 
+	<-dispatchDone
 	if err := <-producerDone; err != nil {
 		return nextResume, err
 	}

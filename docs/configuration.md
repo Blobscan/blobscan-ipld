@@ -13,7 +13,7 @@ is needed. Variables that are unset or empty fall back to the listed default.
 | `BEACON_RPC` | conditional | `""` | Beacon Node REST API base URL (set by compose files from network-specific `{MAINNET,SEPOLIA,HOODI}_BEACON_RPC`). Required for `run` / `epoch` subcommands; not needed for `serve` |
 | `BEACON_TIMEOUT` | no | `60s` | HTTP request timeout for all Beacon Node API calls |
 | `BEACON_RATE_LIMIT` | no | `100` | Max requests/second to beacon RPC. Set to ~80-90% of provider limit (Quicknode: 125 req/s → use `100`) |
-| `BEACON_RATE_BURST` | no | `10` | Token bucket burst size. Controls how many requests can fire at once |
+| `BEACON_RATE_BURST` | no | `32` | Token bucket burst size. Controls how many requests can fire at once |
 | `BEACON_429_BACKOFF` | no | `1s` | Initial backoff when a 429 error is received. Doubles on each consecutive 429, capped at 60s |
 
 ---
@@ -46,6 +46,7 @@ is needed. Variables that are unset or empty fall back to the listed default.
 |----------|----------|---------|-------------|
 | `GENERATOR_WORKERS` | no | `16` | Parallel blob-processing goroutines. CID hashing is CPU-bound; set near vCPU count |
 | `GENERATOR_BEACON_WORKERS` | no | `16` | Parallel slot fetches per epoch. Each slot is one HTTP request; global cap is `BEACON_RATE_LIMIT` |
+| `BACKFILL_EPOCH_WORKERS` | no | `4` | Parallel epoch builders in the backfill pipeline. Each worker fetches+builds one epoch concurrently; the shared `BEACON_RATE_LIMIT` prevents exceeding RPC quotas. Increase for faster backfill on local nodes; decrease if hitting rate limits |
 | `GENERATOR_POLL_INTERVAL` | no | `12s` | How often to query the beacon node for new finalized epochs. One slot = 12s, one epoch = 6.4 min |
 | `GENERATOR_START_EPOCH` | no | network default | First epoch to process when starting from scratch. Defaults to the Dencun fork epoch for known networks (see table below). Set explicitly to resume from a specific epoch |
 | `GENERATOR_HAMT_THRESHOLD` | no | `5000` | If a single epoch has this many blobs or more, the blob index uses HAMT shards instead of a flat map |

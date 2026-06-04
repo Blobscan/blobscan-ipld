@@ -51,8 +51,9 @@ services:
       NETWORK_NAME: mainnet
       BEACON_RPC: "${MAINNET_BEACON_RPC:?MAINNET_BEACON_RPC is required}"
       BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
-      BEACON_RATE_BURST: "10"
+      BEACON_RATE_BURST: "32"
       BEACON_429_BACKOFF: "1s"
+      BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_mainnet?sslmode=disable"
       IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
       DATA_DIR: "/data"
@@ -76,8 +77,9 @@ services:
       NETWORK_NAME: sepolia
       BEACON_RPC: "${SEPOLIA_BEACON_RPC:?SEPOLIA_BEACON_RPC is required}"
       BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
-      BEACON_RATE_BURST: "10"
+      BEACON_RATE_BURST: "32"
       BEACON_429_BACKOFF: "1s"
+      BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)
       POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_sepolia?sslmode=disable"
       IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
       DATA_DIR: "/data"
