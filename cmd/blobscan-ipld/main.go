@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,6 +43,7 @@ Subcommands:
   export-car       Export a CAR v2 file for a single epoch from the DB
   export-car-range Export a single CAR v2 file covering a range of epochs
   backfill-ipfs    Re-fetch blob data from beacon and upload historical epochs to IPFS
+  export-blob-refs Export blob CID references as CSV for import into blobscan DB
   summary          Show indexed-data statistics (use -help for detail flags)
 
 Global flags (before subcommand):
@@ -60,6 +62,8 @@ Examples:
   blobscan-ipld -from 300000 -to 300099 -out /tmp/range.car export-car-range
   blobscan-ipld backfill-ipfs
   blobscan-ipld backfill-ipfs -from 300000 -to 300099
+  blobscan-ipld export-blob-refs -out /tmp/refs.csv
+  blobscan-ipld export-blob-refs -from 300000 -to 300099
   blobscan-ipld summary
   blobscan-ipld summary -gaps -top 10 -monthly -check-ipfs
 `
@@ -120,6 +124,8 @@ func main() {
 		cmdExportCARRange(ctx, cfg, log, subArgs)
 	case "backfill-ipfs":
 		cmdBackfillIPFS(ctx, cfg, log, subArgs)
+	case "export-blob-refs":
+		cmdExportBlobRefs(ctx, cfg, log, subArgs)
 	case "summary":
 		cmdSummary(ctx, cfg, subArgs)
 	default:
@@ -520,6 +526,77 @@ func cmdBackfillIPFS(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 		log.Error("backfill-ipfs failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// export-blob-refs: export blob CID references as CSV importable into blobscan's
+// blob_data_storage_reference table.
+func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
+	fs := flag.NewFlagSet("export-blob-refs", flag.ExitOnError)
+	fromEpoch := fs.Uint64("from", 0, "first epoch to export (default: 0)")
+	toEpoch := fs.Uint64("to", 0, "last epoch to export (default: max epoch in DB)")
+	outPath := fs.String("out", "", "output CSV file path (default: stdout)")
+	_ = fs.Parse(args)
+
+	if cfg.Storage.PostgresDSN == "" {
+		fmt.Fprintln(os.Stderr, "export-blob-refs: POSTGRES_DSN is required")
+		os.Exit(1)
+	}
+
+	dbClient, err := db.New(ctx, cfg.Storage.PostgresDSN)
+	if err != nil {
+		log.Error("failed to connect to postgres", "err", err)
+		os.Exit(1)
+	}
+	defer dbClient.Close()
+
+	// Default -to to the max epoch in the DB when not specified.
+	if *toEpoch == 0 {
+		maxEpoch, err := dbClient.GetMaxEpoch(ctx, cfg.Network.Name)
+		if err != nil {
+			log.Error("failed to query max epoch", "err", err)
+			os.Exit(1)
+		}
+		*toEpoch = maxEpoch
+	}
+
+	refs, err := dbClient.GetBlobRefs(ctx, *fromEpoch, *toEpoch)
+	if err != nil {
+		log.Error("failed to query blob refs", "err", err)
+		os.Exit(1)
+	}
+
+	// Determine output writer.
+	var out *os.File
+	if *outPath != "" {
+		out, err = os.Create(*outPath)
+		if err != nil {
+			log.Error("failed to create output file", "path", *outPath, "err", err)
+			os.Exit(1)
+		}
+		defer out.Close()
+	} else {
+		out = os.Stdout
+	}
+
+	w := csv.NewWriter(out)
+	// Header matches blobscan's blob_data_storage_reference columns.
+	if err := w.Write([]string{"blob_hash", "storage", "data_reference", "meta_reference"}); err != nil {
+		log.Error("failed to write CSV header", "err", err)
+		os.Exit(1)
+	}
+	for _, ref := range refs {
+		if err := w.Write([]string{ref.VersionedHash, "ipfs", ref.DataCID, ref.MetaCID}); err != nil {
+			log.Error("failed to write CSV row", "err", err)
+			os.Exit(1)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		log.Error("CSV write error", "err", err)
+		os.Exit(1)
+	}
+
+	log.Info("export-blob-refs complete", "rows", len(refs), "from", *fromEpoch, "to", *toEpoch)
 }
 
 // summary: human-readable statistics about the indexed data.

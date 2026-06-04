@@ -623,6 +623,41 @@ type BlobRecord struct {
 	SizeBytes     int64
 }
 
+// BlobRef is a lightweight projection of ipld_blobs used for exporting CID
+// references into blobscan's blob_data_storage_reference table.
+type BlobRef struct {
+	VersionedHash string
+	DataCID       string
+	MetaCID       string
+}
+
+// GetBlobRefs streams all (versioned_hash, data_cid, meta_cid) tuples for
+// blobs in the epoch range [fromEpoch, toEpoch]. Results are ordered by epoch
+// and blob_index so the output is deterministic.
+func (c *Client) GetBlobRefs(ctx context.Context, fromEpoch, toEpoch uint64) ([]BlobRef, error) {
+	rows, err := c.pool.Query(ctx,
+		`SELECT versioned_hash, data_cid, meta_cid
+		 FROM ipld_blobs
+		 WHERE epoch >= $1 AND epoch <= $2
+		 ORDER BY epoch, blob_index`,
+		fromEpoch, toEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("db: get blob refs [%d,%d]: %w", fromEpoch, toEpoch, err)
+	}
+	defer rows.Close()
+
+	var out []BlobRef
+	for rows.Next() {
+		var r BlobRef
+		if err := rows.Scan(&r.VersionedHash, &r.DataCID, &r.MetaCID); err != nil {
+			return nil, fmt.Errorf("db: scan blob ref: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (c *Client) GetBlobsByEpoch(ctx context.Context, epoch uint64) ([]BlobRecord, error) {
 	rows, err := c.pool.Query(ctx,
 		`SELECT commitment, data_cid, meta_cid, blob_index,

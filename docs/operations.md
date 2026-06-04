@@ -689,6 +689,63 @@ Set the `network.beacon_rpc` to such an endpoint before running `backfill-ipfs`.
 
 ---
 
+## Exporting blob CID references (export-blob-refs)
+
+The `export-blob-refs` subcommand exports all blob CID references from the
+local DB as a CSV file that can be directly imported into blobscan's
+`blob_data_storage_reference` table.
+
+```bash
+# Export all blobs to a file
+./blobscan-ipld export-blob-refs -out /tmp/refs.csv
+
+# Export a specific epoch range to stdout
+./blobscan-ipld export-blob-refs -from 269568 -to 270000
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-from N` | First epoch to export (default: 0) |
+| `-to N` | Last epoch to export (default: max epoch in DB) |
+| `-out PATH` | Output CSV file path (default: stdout) |
+
+**Requirements:**
+- `POSTGRES_DSN` must be set.
+
+**CSV format:**
+
+The output CSV has a header row and four columns matching the blobscan
+`blob_data_storage_reference` table:
+
+```
+blob_hash,storage,data_reference,meta_reference
+0x01ab…,ipfs,bafyrei…,bafyrei…
+```
+
+**Importing into blobscan:**
+
+```bash
+psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(blob_hash, storage, data_reference, meta_reference) FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true)"
+```
+
+The import uses `\copy` which handles conflicts based on the table's composite
+primary key `(blob_hash, storage)`. If rows already exist, use an intermediate
+staging approach or add `ON CONFLICT DO NOTHING` via a temp table:
+
+```sql
+CREATE TEMP TABLE staging (LIKE blob_data_storage_reference INCLUDING ALL);
+\copy staging FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true);
+INSERT INTO blob_data_storage_reference
+SELECT * FROM staging
+ON CONFLICT (blob_hash, storage) DO UPDATE SET
+  data_reference = EXCLUDED.data_reference,
+  meta_reference = EXCLUDED.meta_reference;
+```
+
+---
+
 ## Backfilling historical epochs
 
 Use the `epoch` subcommand to process a single epoch and exit. This is useful for:
