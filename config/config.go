@@ -14,6 +14,15 @@ type Config struct {
 	Storage   StorageConfig
 	Generator GeneratorConfig
 	Blobscan  BlobscanConfig
+	Sentry    SentryConfig
+}
+
+// SentryConfig holds error-tracking settings.
+type SentryConfig struct {
+	DSN         string  // SENTRY_DSN; empty disables Sentry
+	Environment string  // SENTRY_ENVIRONMENT; defaults to NETWORK_NAME
+	Release     string  // SENTRY_RELEASE; e.g. "v1.2.3"
+	SampleRate  float64 // SENTRY_SAMPLE_RATE; 0–1 (default 1.0)
 }
 
 // BlobscanConfig holds connection settings for reporting CID references back to
@@ -176,6 +185,20 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("BLOBSCAN_API_KEY"); v != "" {
 		c.Blobscan.APIKey = v
 	}
+	if v := os.Getenv("SENTRY_DSN"); v != "" {
+		c.Sentry.DSN = v
+	}
+	if v := os.Getenv("SENTRY_ENVIRONMENT"); v != "" {
+		c.Sentry.Environment = v
+	}
+	if v := os.Getenv("SENTRY_RELEASE"); v != "" {
+		c.Sentry.Release = v
+	}
+	if v := os.Getenv("SENTRY_SAMPLE_RATE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Sentry.SampleRate = f
+		}
+	}
 }
 
 func (c *Config) validate() error {
@@ -260,5 +283,11 @@ func (c *Config) applyDefaults() {
 		if epoch, ok := dencunEpoch(c.Network.Name); ok {
 			c.Generator.StartEpoch = epoch
 		}
+	}
+	if c.Sentry.SampleRate == 0 {
+		c.Sentry.SampleRate = 1.0
+	}
+	if c.Sentry.Environment == "" {
+		c.Sentry.Environment = c.Network.Name
 	}
 }

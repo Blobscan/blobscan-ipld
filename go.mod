@@ -15,6 +15,8 @@ require (
 )
 
 require (
+	github.com/getsentry/sentry-go v0.46.2 // indirect
+	github.com/getsentry/sentry-go/slog v0.46.2 // indirect
 	github.com/ipfs/boxo v0.39.0 // indirect
 	github.com/ipfs/go-ipld-cbor v0.2.1 // indirect
 	github.com/ipfs/go-ipld-format v0.6.3 // indirect

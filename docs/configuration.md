@@ -80,6 +80,19 @@ explicitly if genesis-era slots predate EIP-4844.
 
 ---
 
+## Sentry (optional)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SENTRY_DSN` | no | `""` | Sentry DSN. Leave empty to disable error tracking |
+| `SENTRY_ENVIRONMENT` | no | `$NETWORK_NAME` | Sentry environment tag (e.g. `mainnet`, `sepolia`, `production`) |
+| `SENTRY_RELEASE` | no | `""` | Release string sent with events, e.g. `v1.2.3` or a git SHA |
+| `SENTRY_SAMPLE_RATE` | no | `1.0` | Traces sample rate (0–1). `1.0` captures every event |
+
+When `SENTRY_DSN` is set, all `ERROR`-level log entries are automatically forwarded to Sentry. Sentry is flushed with a 2-second timeout on shutdown.
+
+---
+
 ## Validation rules
 
 The process exits at startup if any of these are violated:
