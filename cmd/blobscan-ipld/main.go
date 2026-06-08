@@ -1094,19 +1094,13 @@ func cmdRepairEpochs(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 		os.Exit(1)
 	}
 
-	ok, failed := 0, 0
-	for _, epoch := range epochs {
-		if ctx.Err() != nil {
-			break
-		}
-		if err := gen.FinalizeEpoch(ctx, epoch); err != nil {
+	ok, failed := gen.RepairEpochs(ctx, epochs, func(epoch uint64, err error) {
+		if err != nil {
 			log.Error("failed to repair epoch", "epoch", epoch, "err", err)
-			failed++
-			continue
+		} else {
+			log.Info("epoch repaired", "epoch", epoch)
 		}
-		log.Info("epoch repaired", "epoch", epoch)
-		ok++
-	}
+	})
 
 	log.Info("repair complete", "repaired", ok, "failed", failed)
 	if failed > 0 {

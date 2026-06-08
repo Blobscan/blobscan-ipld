@@ -921,6 +921,70 @@ func (g *Generator) FinalizeEpoch(ctx context.Context, epoch uint64) error {
 	return err
 }
 
+// RepairEpochs rebuilds epoch nodes from the DB cache for all epochs that have
+// blob_count=0 in ipld_epochs but real rows in ipld_blobs. It uploads to IPFS
+// once per epoch but defers the expensive network root rebuild to the end.
+func (g *Generator) RepairEpochs(ctx context.Context, epochs []uint64, onDone func(epoch uint64, err error)) (int, int) {
+	ok, failed := 0, 0
+	for _, epoch := range epochs {
+		if ctx.Err() != nil {
+			break
+		}
+		if g.db == nil {
+			onDone(epoch, fmt.Errorf("DB not configured"))
+			failed++
+			continue
+		}
+		blobs, err := g.db.GetBlobsByEpoch(ctx, g.cfg.Network.Name, epoch)
+		if err != nil {
+			onDone(epoch, fmt.Errorf("load blobs: %w", err))
+			failed++
+			continue
+		}
+		if len(blobs) == 0 {
+			onDone(epoch, fmt.Errorf("no blobs in DB"))
+			failed++
+			continue
+		}
+		epochInp, blobResults, err := g.reconstructFromDB(epoch, blobs)
+		if err != nil {
+			onDone(epoch, fmt.Errorf("reconstruct: %w", err))
+			failed++
+			continue
+		}
+		epochBS := store.NewMemBlockstore()
+		lsys := store.NewLinkSystem(epochBS)
+		epochResult, err := builder.BuildEpochNode(ctx, lsys, epochInp, blobResults,
+			g.cfg.Network.Name, g.cfg.Generator.HAMTThreshold)
+		if err != nil {
+			onDone(epoch, fmt.Errorf("build node: %w", err))
+			failed++
+			continue
+		}
+		if err := g.uploadAndPin(ctx, epochBS, epochResult.CID, epoch); err != nil {
+			onDone(epoch, fmt.Errorf("ipfs upload: %w", err))
+			failed++
+			continue
+		}
+		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
+		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobs), epochTime); err != nil {
+			onDone(epoch, fmt.Errorf("save epoch: %w", err))
+			failed++
+			continue
+		}
+		onDone(epoch, nil)
+		ok++
+	}
+
+	// Rebuild network root once after all epochs are repaired.
+	if ok > 0 {
+		if err := g.rebuildNetworkRoot(ctx); err != nil {
+			g.log.Warn("network root rebuild failed after repair (non-fatal)", "err", err)
+		}
+	}
+	return ok, failed
+}
+
 // finalizeEpochInner contains the shared implementation; returns the EpochNode CID.
 // Requires DB persistence to be enabled (blobs must have been saved via SaveBlobs).
 func (g *Generator) finalizeEpochInner(ctx context.Context, epoch uint64) (cid.Cid, error) {
