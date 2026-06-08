@@ -212,6 +212,12 @@ error.
 ### `func (c *Client) Pin(ctx, c cid.Cid) error`
 Recursively pins a CID via `POST /api/v0/pin/add?recursive=true`.
 
+### `func (c *Client) ListRecursivePins(ctx) (map[string]struct{}, error)`
+Returns the set of recursively-pinned CIDs via a single
+`POST /api/v0/pin/ls?type=recursive`, keyed by canonical `cid.Cid` string. Lets
+callers check many CIDs against one response instead of one `block/stat` each;
+used by `summary -check-ipfs`.
+
 ### `func (c *Client) DagStat(ctx, root cid.Cid) (uint64, error)`
 Returns the cumulative DAG size in bytes via `POST /api/v0/dag/stat`.
 

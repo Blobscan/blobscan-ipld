@@ -666,7 +666,7 @@ indexed without requiring any manual SQL queries.
 
 | Flag | Description |
 |------|-------------|
-| `-check-ipfs` | Check each epoch node CID against the IPFS node (16 parallel workers). Reports how many epoch nodes are present and lists any missing ones (up to 10). |
+| `-check-ipfs` | Check each epoch node CID against the IPFS node. Reports how many epoch nodes are present and lists any missing ones (up to 10). Progress is printed to stderr while running. |
 | `-gaps` | List all contiguous ranges of missing epochs within the indexed range. |
 | `-top N` | Show the N epochs with the highest blob count as a table (epoch, blobs, size, time). |
 | `-monthly` | Show a month-by-month breakdown of indexed epochs, blobs, and data size. |
@@ -678,9 +678,14 @@ indexed without requiring any manual SQL queries.
                    missing: 132900 · 133100 · 133500
 ```
 
-The check uses `block/stat` on each epoch node CID. If an epoch node is present
-its blob blocks were also uploaded in the same batch, so this is a reliable proxy
-for overall IPFS upload completeness. Use `backfill-ipfs` to recover missing epochs.
+By default the check fetches the node's recursive pin set in a single
+`pin/ls?type=recursive` request and resolves every epoch with an in-memory
+lookup, so it costs roughly one round-trip regardless of epoch count. This works
+because epoch roots are pinned on upload (`IPFS_PIN_ON_ADD`, on by default). If
+`pin/ls` is unavailable or pinning is disabled, it falls back to one
+`block/stat` per epoch across a worker pool. If an epoch node is present its blob
+blocks were also uploaded in the same batch, so this is a reliable proxy for
+overall IPFS upload completeness. Use `backfill-ipfs` to recover missing epochs.
 
 **`-gaps` detail:**
 

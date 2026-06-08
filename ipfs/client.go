@@ -104,6 +104,54 @@ func (c *Client) HasBlock(ctx context.Context, id cid.Cid) (bool, error) {
 	return resp.StatusCode == http.StatusOK, nil
 }
 
+// ListRecursivePins returns the set of recursively-pinned CIDs on the node,
+// keyed by their canonical cid.Cid string. It issues a single
+// /api/v0/pin/ls?type=recursive request, so checking many CIDs against the
+// returned set is far cheaper than one block/stat per CID.
+//
+// CIDs are re-encoded through cid.Decode so the keys match regardless of the
+// base/version the node reports them in; callers should look up using the same
+// canonical form (see cid.Cid.String after Decode).
+func (c *Client) ListRecursivePins(ctx context.Context) (map[string]struct{}, error) {
+	endpoint := fmt.Sprintf("%s/api/v0/pin/ls?type=recursive", c.base)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ipfs: build pin/ls request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ipfs: pin/ls request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ipfs: pin/ls HTTP %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		Keys map[string]struct {
+			Type string `json:"Type"`
+		} `json:"Keys"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("ipfs: pin/ls decode: %w", err)
+	}
+
+	set := make(map[string]struct{}, len(result.Keys))
+	for raw := range result.Keys {
+		id, err := cid.Decode(raw)
+		if err != nil {
+			// Keep the raw form too so an unparseable key can still match a
+			// caller that happens to compare raw strings.
+			set[raw] = struct{}{}
+			continue
+		}
+		set[id.String()] = struct{}{}
+	}
+	return set, nil
+}
+
 // PutBlock uploads a single raw block to the IPFS node using /api/v0/block/put.
 // The CID codec and multihash are inferred from the block's CID prefix.
 func (c *Client) PutBlock(ctx context.Context, blk blocks.Block) error {

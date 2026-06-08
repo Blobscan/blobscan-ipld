@@ -813,14 +813,54 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 	}
 }
 
-// checkEpochsInIPFS checks all epoch node CIDs against the IPFS node using a
-// worker pool sized by the workers parameter. Returns the count of present
-// epochs and a sorted list of missing epoch numbers.
+// checkEpochsInIPFS reports how many epoch root CIDs are present on the IPFS
+// node and which epochs are missing.
+//
+// Fast path: fetch the node's recursive pin set in a single pin/ls request and
+// resolve every epoch with an in-memory lookup — O(1) HTTP regardless of epoch
+// count. This works because epoch roots are pinned on upload (see
+// IPFSConfig.PinOnAdd, on by default). If pin/ls is unavailable or pinning is
+// disabled, fall back to one block/stat per epoch across a worker pool.
 func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *db.Client, network string, progress io.Writer, workers int) (int64, []uint64) {
 	records, err := dbClient.GetAllEpochs(ctx, network)
 	if err != nil || len(records) == 0 {
 		return 0, nil
 	}
+
+	if pins, err := ipfsClient.ListRecursivePins(ctx); err == nil {
+		return checkEpochsAgainstPins(records, pins, progress)
+	} else if progress != nil {
+		fmt.Fprintf(progress, "  pin/ls unavailable (%v); falling back to per-epoch block/stat\n", err)
+	}
+	return checkEpochsByBlockStat(ctx, ipfsClient, records, progress, workers)
+}
+
+// checkEpochsAgainstPins resolves each epoch by membership in an already-fetched
+// recursive pin set, comparing canonical CID strings.
+func checkEpochsAgainstPins(records []db.EpochRecord, pins map[string]struct{}, progress io.Writer) (int64, []uint64) {
+	var present int64
+	var missing []uint64
+	for _, rec := range records {
+		ok := false
+		if c, err := cid.Decode(rec.CID); err == nil {
+			_, ok = pins[c.String()]
+		}
+		if ok {
+			present++
+		} else {
+			missing = append(missing, rec.Epoch)
+		}
+	}
+	if progress != nil {
+		fmt.Fprintf(progress, "  checking IPFS: %d/%d epochs (pin set)\n", len(records), len(records))
+	}
+	sortUint64(missing)
+	return present, missing
+}
+
+// checkEpochsByBlockStat is the fallback path: one block/stat per epoch fanned
+// out across a worker pool. Used when the recursive pin set is unavailable.
+func checkEpochsByBlockStat(ctx context.Context, ipfsClient *ipfs.Client, records []db.EpochRecord, progress io.Writer, workers int) (int64, []uint64) {
 	total := len(records)
 
 	type checkResult struct {
