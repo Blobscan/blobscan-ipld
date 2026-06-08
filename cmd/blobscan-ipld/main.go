@@ -705,11 +705,12 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 		if cfg.IPFS.SkipUpload || cfg.IPFS.APIAddr == "" {
 			printRow("IPFS", "⚠ not configured (skip_upload=true or no api_addr)")
 		} else {
-			ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, false, cfg.IPFS.UploadWorkers)
+			const checkWorkers = 64
+			ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, false, checkWorkers)
 			if err != nil {
 				printRow("IPFS", fmt.Sprintf("⚠ cannot connect: %v", err))
 			} else {
-				present, missingEpochs := checkEpochsInIPFS(ctx, ipfsClient, dbClient, cfg.Network.Name, os.Stderr)
+				present, missingEpochs := checkEpochsInIPFS(ctx, ipfsClient, dbClient, cfg.Network.Name, os.Stderr, checkWorkers)
 				total := present + int64(len(missingEpochs))
 				pct := 0.0
 				if total > 0 {
@@ -813,9 +814,9 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 }
 
 // checkEpochsInIPFS checks all epoch node CIDs against the IPFS node using a
-// 16-goroutine worker pool. Returns the count of present epochs and a sorted
-// list of missing epoch numbers.
-func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *db.Client, network string, progress io.Writer) (int64, []uint64) {
+// worker pool sized by the workers parameter. Returns the count of present
+// epochs and a sorted list of missing epoch numbers.
+func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *db.Client, network string, progress io.Writer, workers int) (int64, []uint64) {
 	records, err := dbClient.GetAllEpochs(ctx, network)
 	if err != nil || len(records) == 0 {
 		return 0, nil
@@ -830,7 +831,6 @@ func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *d
 	jobs := make(chan db.EpochRecord, total)
 	results := make(chan checkResult, total)
 
-	const workers = 16
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
