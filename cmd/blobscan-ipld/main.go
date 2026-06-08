@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -708,7 +709,7 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 			if err != nil {
 				printRow("IPFS", fmt.Sprintf("⚠ cannot connect: %v", err))
 			} else {
-				present, missingEpochs := checkEpochsInIPFS(ctx, ipfsClient, dbClient, cfg.Network.Name)
+				present, missingEpochs := checkEpochsInIPFS(ctx, ipfsClient, dbClient, cfg.Network.Name, os.Stderr)
 				total := present + int64(len(missingEpochs))
 				pct := 0.0
 				if total > 0 {
@@ -814,19 +815,20 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 // checkEpochsInIPFS checks all epoch node CIDs against the IPFS node using a
 // 16-goroutine worker pool. Returns the count of present epochs and a sorted
 // list of missing epoch numbers.
-func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *db.Client, network string) (int64, []uint64) {
+func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *db.Client, network string, progress io.Writer) (int64, []uint64) {
 	records, err := dbClient.GetAllEpochs(ctx, network)
 	if err != nil || len(records) == 0 {
 		return 0, nil
 	}
+	total := len(records)
 
 	type checkResult struct {
 		epoch   uint64
 		present bool
 	}
 
-	jobs := make(chan db.EpochRecord, len(records))
-	results := make(chan checkResult, len(records))
+	jobs := make(chan db.EpochRecord, total)
+	results := make(chan checkResult, total)
 
 	const workers = 16
 	var wg sync.WaitGroup
@@ -852,12 +854,21 @@ func checkEpochsInIPFS(ctx context.Context, ipfsClient *ipfs.Client, dbClient *d
 
 	var present int64
 	var missing []uint64
+	done := 0
 	for r := range results {
+		done++
 		if r.present {
 			present++
 		} else {
 			missing = append(missing, r.epoch)
 		}
+		if progress != nil {
+			fmt.Fprintf(progress, "\r  checking IPFS: %d/%d epochs (%.0f%%)   ",
+				done, total, float64(done)/float64(total)*100)
+		}
+	}
+	if progress != nil {
+		fmt.Fprintln(progress)
 	}
 	sortUint64(missing)
 	return present, missing
