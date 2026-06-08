@@ -73,7 +73,7 @@ Examples:
   blobscan-ipld export-blob-refs -from 300000 -to 300099
   blobscan-ipld export-blob-refs -meta -out /tmp/refs.csv
   blobscan-ipld summary
-  blobscan-ipld summary -gaps -top 10 -monthly -check-ipfs
+  blobscan-ipld summary -gaps -empty -top 10 -monthly -check-ipfs
   blobscan-ipld repair-epochs
   blobscan-ipld repair-epochs -dry-run
 `
@@ -841,6 +841,7 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 	fs := flag.NewFlagSet("summary", flag.ExitOnError)
 	checkIPFS := fs.Bool("check-ipfs", false, "verify epoch node CIDs are present on the IPFS node")
 	showGaps := fs.Bool("gaps", false, "list all missing epoch ranges")
+	showEmpty := fs.Bool("empty", false, "list all genuinely empty epochs (no blobs on-chain)")
 	topN := fs.Int("top", 0, "show the top N epochs by blob count")
 	monthly := fs.Bool("monthly", false, "show a month-by-month breakdown")
 	_ = fs.Parse(args)
@@ -994,6 +995,45 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 						formatCount(int64(g.Count())), pluralS(int64(g.Count())))
 				}
 			}
+		}
+	}
+
+	// ── Empty epochs detail ───────────────────────────────────────────────────
+	if *showEmpty {
+		emptyEpochs, err := dbClient.GetEmptyEpochs(ctx, cfg.Network.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nsummary: query empty epochs: %v\n", err)
+			os.Exit(1)
+		}
+		if len(emptyEpochs) == 0 {
+			printSectionHeader("Empty epochs", "none", sumWidth)
+		} else {
+			printSectionHeader("Empty epochs",
+				fmt.Sprintf("%s epoch%s with no blobs on-chain",
+					formatCount(int64(len(emptyEpochs))), pluralS(int64(len(emptyEpochs)))),
+				sumWidth)
+			// Print as compact ranges.
+			start := emptyEpochs[0]
+			end := emptyEpochs[0]
+			flush := func() {
+				if start == end {
+					fmt.Printf("  %d\n", start)
+				} else {
+					fmt.Printf("  %d → %d  (%s epoch%s)\n",
+						start, end,
+						formatCount(int64(end-start+1)), pluralS(int64(end-start+1)))
+				}
+			}
+			for _, e := range emptyEpochs[1:] {
+				if e == end+1 {
+					end = e
+				} else {
+					flush()
+					start = e
+					end = e
+				}
+			}
+			flush()
 		}
 	}
 

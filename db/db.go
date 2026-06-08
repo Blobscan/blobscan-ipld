@@ -661,6 +661,36 @@ func (c *Client) GetBlobRefs(ctx context.Context, network string, fromEpoch, toE
 	return out, rows.Err()
 }
 
+// GetEmptyEpochs returns all epoch numbers for the network that have
+// blob_count=0 in ipld_epochs and no rows in ipld_blobs — i.e. genuinely
+// empty epochs (no blobs on-chain), not corrupted ones.
+func (c *Client) GetEmptyEpochs(ctx context.Context, network string) ([]uint64, error) {
+	rows, err := c.pool.Query(ctx,
+		`SELECT e.epoch
+		 FROM ipld_epochs e
+		 WHERE e.network = $1 AND e.blob_count = 0
+		   AND NOT EXISTS (
+		       SELECT 1 FROM ipld_blobs b
+		       WHERE b.epoch = e.epoch AND b.network = e.network
+		   )
+		 ORDER BY e.epoch`,
+		network,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("db: get empty epochs: %w", err)
+	}
+	defer rows.Close()
+	var out []uint64
+	for rows.Next() {
+		var epoch uint64
+		if err := rows.Scan(&epoch); err != nil {
+			return nil, fmt.Errorf("db: scan empty epoch: %w", err)
+		}
+		out = append(out, epoch)
+	}
+	return out, rows.Err()
+}
+
 // GetCorruptedEpochs returns epochs whose ipld_epochs row has blob_count=0
 // but whose ipld_blobs rows have actual blobs — i.e. epochs that were
 // incorrectly saved as empty and need to be rebuilt from the DB cache.
