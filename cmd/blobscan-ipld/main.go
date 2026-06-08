@@ -547,6 +547,7 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 	workersFlag := fs.Int("workers", 4, "parallel pin/add requests (recursive pinning is heavy; keep low to avoid saturating the node)")
 	timeoutFlag := fs.Duration("pin-timeout", 2*time.Minute, "per-pin timeout; a recursive pin/add exceeding this is retried")
 	retriesFlag := fs.Int("retries", 2, "retry attempts per epoch on transient pin failure")
+	limitFlag := fs.Int("limit", 0, "only attempt the first N not-yet-pinned epochs (0 = all); useful for testing")
 	_ = fs.Parse(args)
 
 	workers := *workersFlag
@@ -625,6 +626,11 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 		"to_pin", len(todo),
 		"unparseable_cids", badCIDs)
 
+	if *limitFlag > 0 && *limitFlag < len(todo) {
+		todo = todo[:*limitFlag]
+		log.Info("limiting this run", "attempting", len(todo))
+	}
+
 	if *dryRun {
 		log.Info("dry-run: no pins performed")
 		return
@@ -649,6 +655,7 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 	var (
 		missingEpochs []uint64 // root block absent locally → needs backfill-ipfs
 		stuckEpochs   []uint64 // root present but pin failed → re-runnable (slow/deep block)
+		sampleErr     error    // first failure, surfaced so the cause is visible
 	)
 	report := func() {
 		fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d  (%.0f%%, %d failed)   ",
@@ -673,6 +680,9 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 				done++
 				if err != nil {
 					failed++
+					if sampleErr == nil {
+						sampleErr = err
+					}
 					if rootMissing {
 						missingEpochs = append(missingEpochs, j.epoch)
 					} else {
@@ -702,6 +712,9 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 		sortUint64(missingEpochs)
 		log.Warn("root block absent from local datastore; these need re-upload via backfill-ipfs, not pinning",
 			"count", len(missingEpochs), "first", firstN(missingEpochs, 10))
+	}
+	if sampleErr != nil {
+		log.Warn("sample pin failure (first error encountered)", "err", sampleErr)
 	}
 	log.Info("pin-existing complete",
 		"pinned", pinned,
