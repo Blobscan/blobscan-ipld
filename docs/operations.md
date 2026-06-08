@@ -932,22 +932,14 @@ Progress (`pinning: N/M (P%, F failed)`) prints to stderr. Flags:
 | `-workers N` | `4` | Parallel `pin/add` requests. Raise cautiously; too many recursive pins saturate the node. |
 | `-pin-timeout D` | `2m` | Per-pin timeout; a pin exceeding it is retried. |
 | `-retries N` | `2` | Retry attempts per epoch on transient failure. |
+| `-limit N` | `0` | Attempt only the first N not-yet-pinned epochs (0 = all). Useful for reproducing a failure quickly. |
 | `-dry-run` | `false` | Report counts without pinning. |
 
 The run is resumable: any epochs that still fail after retries are listed in a
-final warning, and re-running `pin-existing` skips everything already pinned and
-retries only the rest.
-
-On each pin failure the command probes the epoch's root block locally
-(`block/stat?offline=true`) to classify the failure, so the summary tells you
-which remedy applies:
-
-- **`retryable`** — the root block is present locally; the pin failed because the
-  node was slow (or a deep block is missing). Re-run `pin-existing`, optionally
-  with `-workers 2 -pin-timeout 5m`.
-- **`needs_backfill`** — the root block is absent from the local datastore, so
-  there is nothing to pin. Re-upload the data with `backfill-ipfs` (e.g.
-  `backfill-ipfs -from <epoch> -to <epoch>`), then pin.
+final warning (with the first error surfaced as a sample), and re-running
+`pin-existing` skips everything already pinned and retries only the rest. If an
+epoch keeps failing, its blocks may not be on the node — re-upload it with
+`backfill-ipfs -from <epoch> -to <epoch>`.
 
 Equivalent shell one-liner, if you prefer driving Kubo directly:
 

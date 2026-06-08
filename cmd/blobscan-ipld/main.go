@@ -28,6 +28,8 @@ import (
 
 	"flag"
 
+	sentry "github.com/getsentry/sentry-go"
+	sentryslog "github.com/getsentry/sentry-go/slog"
 	"github.com/ipfs/go-cid"
 )
 
@@ -102,6 +104,26 @@ func main() {
 	if err != nil {
 		log.Error("failed to load config", "err", err)
 		os.Exit(1)
+	}
+
+	if cfg.Sentry.DSN != "" {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              cfg.Sentry.DSN,
+			Environment:      cfg.Sentry.Environment,
+			Release:          cfg.Sentry.Release,
+			TracesSampleRate: cfg.Sentry.SampleRate,
+		}); err != nil {
+			log.Warn("sentry init failed", "err", err)
+		} else {
+			log.Info("✓ Sentry error tracking enabled", "environment", cfg.Sentry.Environment)
+			defer sentry.Flush(2 * time.Second)
+			// Tee Error-level logs to Sentry automatically.
+			sentryHandler := sentryslog.Option{
+				EventLevel: []slog.Level{slog.LevelError},
+				LogLevel:   []slog.Level{},
+			}.NewSentryHandler(context.Background())
+			log = slog.New(newTeeHandler(log.Handler(), sentryHandler))
+		}
 	}
 
 	for _, dir := range []string{cfg.Storage.DataDir, cfg.Storage.CARDir} {
@@ -653,9 +675,8 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 	)
 	total := len(todo)
 	var (
-		missingEpochs []uint64 // root block absent locally → needs backfill-ipfs
-		stuckEpochs   []uint64 // root present but pin failed → re-runnable (slow/deep block)
-		sampleErr     error    // first failure, surfaced so the cause is visible
+		failedEpochs []uint64 // epochs whose pin failed after retries; re-run to retry them
+		sampleErr    error    // first failure, surfaced so the cause is visible
 	)
 	report := func() {
 		fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d  (%.0f%%, %d failed)   ",
@@ -667,15 +688,6 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 			defer wg.Done()
 			for j := range jobs {
 				err := pinWithRetry(ctx, ipfsClient, j.cid, pinTimeout, pinRetries)
-				// On failure, probe the root block locally (offline) to tell a
-				// genuinely-missing epoch from a slow/transient pin.
-				rootMissing := false
-				if err != nil && ctx.Err() == nil {
-					pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-					present, herr := ipfsClient.HasBlock(pctx, j.cid)
-					cancel()
-					rootMissing = herr == nil && !present
-				}
 				mu.Lock()
 				done++
 				if err != nil {
@@ -683,11 +695,7 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 					if sampleErr == nil {
 						sampleErr = err
 					}
-					if rootMissing {
-						missingEpochs = append(missingEpochs, j.epoch)
-					} else {
-						stuckEpochs = append(stuckEpochs, j.epoch)
-					}
+					failedEpochs = append(failedEpochs, j.epoch)
 				} else {
 					pinned++
 				}
@@ -703,24 +711,15 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
 
-	if len(stuckEpochs) > 0 {
-		sortUint64(stuckEpochs)
-		log.Warn("pin failed but root block is present locally (node slow, or a deep block is missing); re-run pin-existing to retry",
-			"count", len(stuckEpochs), "first", firstN(stuckEpochs, 10))
-	}
-	if len(missingEpochs) > 0 {
-		sortUint64(missingEpochs)
-		log.Warn("root block absent from local datastore; these need re-upload via backfill-ipfs, not pinning",
-			"count", len(missingEpochs), "first", firstN(missingEpochs, 10))
+	if len(failedEpochs) > 0 {
+		sortUint64(failedEpochs)
+		log.Warn("some epochs could not be pinned; re-run pin-existing to retry them",
+			"count", len(failedEpochs), "first", firstN(failedEpochs, 10))
 	}
 	if sampleErr != nil {
 		log.Warn("sample pin failure (first error encountered)", "err", sampleErr)
 	}
-	log.Info("pin-existing complete",
-		"pinned", pinned,
-		"failed", failed,
-		"retryable", len(stuckEpochs),
-		"needs_backfill", len(missingEpochs))
+	log.Info("pin-existing complete", "pinned", pinned, "failed", failed)
 	if failed > 0 {
 		os.Exit(1)
 	}
@@ -1239,9 +1238,38 @@ func sortUint64(a []uint64) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+// teeHandler fans a slog record out to two handlers. Used to send Error-level
+// logs to Sentry while still writing them to the original handler.
+type teeHandler struct {
+	primary   slog.Handler
+	secondary slog.Handler
+}
+
+func newTeeHandler(primary, secondary slog.Handler) *teeHandler {
+	return &teeHandler{primary: primary, secondary: secondary}
+}
+
+func (h *teeHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.primary.Enabled(ctx, level) || h.secondary.Enabled(ctx, level)
+}
+
+func (h *teeHandler) Handle(ctx context.Context, r slog.Record) error {
+	_ = h.secondary.Handle(ctx, r)
+	return h.primary.Handle(ctx, r)
+}
+
+func (h *teeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return newTeeHandler(h.primary.WithAttrs(attrs), h.secondary.WithAttrs(attrs))
+}
+
+func (h *teeHandler) WithGroup(name string) slog.Handler {
+	return newTeeHandler(h.primary.WithGroup(name), h.secondary.WithGroup(name))
+}
+
 func newIPFSClientFromConfig(cfg *config.Config) (*ipfs.Client, error) {
 	return ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, cfg.IPFS.PinOnAdd, cfg.IPFS.UploadWorkers)
 }
+
 
 func newLogger(level string) *slog.Logger {
 	var lvl slog.Level
