@@ -330,7 +330,7 @@ func cmdExportCAR(ctx context.Context, cfg *config.Config, log *slog.Logger, arg
 	}
 
 	// Load all blob CIDs for this epoch.
-	blobs, err := dbClient.GetBlobsByEpoch(ctx, *epochNum)
+	blobs, err := dbClient.GetBlobsByEpoch(ctx, cfg.Network.Name, *epochNum)
 	if err != nil {
 		log.Error("failed to query blobs", "epoch", *epochNum, "err", err)
 		os.Exit(1)
@@ -441,7 +441,7 @@ func cmdExportCARRange(ctx context.Context, cfg *config.Config, log *slog.Logger
 	var epochResults []types.EpochResult
 
 	for _, e := range entries {
-		blobs, err := dbClient.GetBlobsByEpoch(ctx, e.record.Epoch)
+		blobs, err := dbClient.GetBlobsByEpoch(ctx, cfg.Network.Name, e.record.Epoch)
 		if err != nil {
 			log.Error("failed to query blobs", "epoch", e.record.Epoch, "err", err)
 			os.Exit(1)

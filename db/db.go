@@ -364,11 +364,11 @@ func (b *DBStateBackend) SetBackfillCursor(ctx context.Context, epoch uint64) er
 
 // ─── Read operations ──────────────────────────────────────────────────────────
 
-// EpochExists reports whether an epoch has already been saved.
-func (c *Client) EpochExists(ctx context.Context, epoch uint64) (bool, error) {
+// EpochExists reports whether an epoch has already been saved for the given network.
+func (c *Client) EpochExists(ctx context.Context, network string, epoch uint64) (bool, error) {
 	var exists bool
 	err := c.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM ipld_epochs WHERE epoch = $1)`, epoch,
+		`SELECT EXISTS(SELECT 1 FROM ipld_epochs WHERE epoch = $1 AND network = $2)`, epoch, network,
 	).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("db: epoch exists %d: %w", epoch, err)
@@ -661,12 +661,12 @@ func (c *Client) GetBlobRefs(ctx context.Context, network string, fromEpoch, toE
 	return out, rows.Err()
 }
 
-func (c *Client) GetBlobsByEpoch(ctx context.Context, epoch uint64) ([]BlobRecord, error) {
+func (c *Client) GetBlobsByEpoch(ctx context.Context, network string, epoch uint64) ([]BlobRecord, error) {
 	rows, err := c.pool.Query(ctx,
 		`SELECT commitment, data_cid, meta_cid, blob_index,
 		        slot, slot_time, versioned_hash, tx_hash, block_number, block_hash, size_bytes
-		 FROM ipld_blobs WHERE epoch = $1 ORDER BY blob_index`,
-		epoch,
+		 FROM ipld_blobs WHERE network = $1 AND epoch = $2 ORDER BY blob_index`,
+		network, epoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("db: get blobs epoch %d: %w", epoch, err)

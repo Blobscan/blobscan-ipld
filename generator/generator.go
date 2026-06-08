@@ -453,15 +453,15 @@ func (g *Generator) runBackfillPipeline(
 					return
 				}
 
-				// Skip epochs already saved in the DB.
+				// Skip epochs already saved in the DB for this network.
 				if g.db != nil {
-					exists, err := g.db.EpochExists(pctx, epoch)
+					exists, err := g.db.EpochExists(pctx, g.cfg.Network.Name, epoch)
 					if err != nil {
 						resultCh <- buildResult{epoch: epoch, err: fmt.Errorf("backfill: check epoch %d: %w", epoch, err)}
 						return
 					}
 					if exists {
-						resultCh <- buildResult{epoch: epoch, be: builtEpoch{epoch: epoch, empty: true}}
+						resultCh <- buildResult{epoch: epoch, be: builtEpoch{epoch: epoch, skip: true}}
 						continue
 					}
 				}
@@ -566,13 +566,15 @@ func (g *Generator) runBackfillPipeline(
 			<-producerDone
 			return nextResume, j.err
 		}
-		if err := g.persistEpoch(pctx, j.be); err != nil {
-			cancel()
-			for range pending {
+		if !j.be.skip {
+			if err := g.persistEpoch(pctx, j.be); err != nil {
+				cancel()
+				for range pending {
+				}
+				<-dispatchDone
+				<-producerDone
+				return nextResume, fmt.Errorf("backfill: persist epoch %d: %w", j.epoch, err)
 			}
-			<-dispatchDone
-			<-producerDone
-			return nextResume, fmt.Errorf("backfill: persist epoch %d: %w", j.epoch, err)
 		}
 		if err := g.state.SetBackfillCursor(pctx, j.epoch); err != nil {
 			cancel()
@@ -603,6 +605,7 @@ type builtEpoch struct {
 	epochBS     *store.MemBlockstore
 	fromCache   bool
 	empty       bool // epoch had no blobs; a zero-blob EpochNode is built at persist time
+	skip        bool // epoch already in DB for this network; do not persist
 }
 
 // buildEpoch performs the CPU + beacon-bound stage of processing one epoch:
@@ -628,7 +631,7 @@ func (g *Generator) buildEpoch(ctx context.Context, epoch uint64, p *epochProgre
 	}
 
 	if g.db != nil {
-		cached, err := g.db.GetBlobsByEpoch(ctx, epoch)
+		cached, err := g.db.GetBlobsByEpoch(ctx, g.cfg.Network.Name, epoch)
 		if err != nil {
 			return out, fmt.Errorf("check cached blobs epoch %d: %w", epoch, err)
 		}
@@ -924,7 +927,7 @@ func (g *Generator) finalizeEpochInner(ctx context.Context, epoch uint64) (cid.C
 	if g.db == nil {
 		return cid.Cid{}, fmt.Errorf("finalize epoch %d: DB persistence is disabled (postgres_dsn not set); cannot reconstruct blobs", epoch)
 	}
-	blobs, err := g.db.GetBlobsByEpoch(ctx, epoch)
+	blobs, err := g.db.GetBlobsByEpoch(ctx, g.cfg.Network.Name, epoch)
 	if err != nil {
 		return cid.Cid{}, fmt.Errorf("load blobs epoch %d: %w", epoch, err)
 	}
@@ -1171,7 +1174,7 @@ func (g *Generator) BackfillIPFS(ctx context.Context, fromEpoch, toEpoch uint64)
 		}
 
 		// Load DB records — if none exist the epoch was never indexed; skip.
-		dbBlobs, err := g.db.GetBlobsByEpoch(ctx, epoch)
+		dbBlobs, err := g.db.GetBlobsByEpoch(ctx, g.cfg.Network.Name, epoch)
 		if err != nil {
 			return fmt.Errorf("backfill-ipfs: load blobs epoch %d: %w", epoch, err)
 		}
