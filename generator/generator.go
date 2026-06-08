@@ -1053,7 +1053,10 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 	}
 	g.log.Info("IPFS upload complete", "epoch", epoch, "blocks", total)
 	if g.cfg.IPFS.PinOnAdd {
-		if err := g.ipfs.Pin(ctx, epochCID); err != nil {
+		pinCtx, pinCancel := context.WithTimeout(ctx, 30*time.Second)
+		err := g.ipfs.Pin(pinCtx, epochCID)
+		pinCancel()
+		if err != nil {
 			g.log.Warn("pin epoch failed (non-fatal)", "epoch", epoch, "cid", epochCID, "err", err)
 		}
 	}
