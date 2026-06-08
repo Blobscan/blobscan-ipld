@@ -35,7 +35,11 @@ type NetworkConfig struct {
 
 // IPFSConfig holds connection settings for the IPFS node.
 type IPFSConfig struct {
-	APIAddr       string        // e.g. "/ip4/127.0.0.1/tcp/5001"
+	APIAddr string // e.g. "/ip4/127.0.0.1/tcp/5001"
+	// PinOnAdd recursively pins each epoch root after upload. Defaults to true:
+	// on an archival node unpinned blocks are eligible for garbage collection
+	// (ipfs repo gc), so pinning protects indexed data. Opt out with
+	// IPFS_PIN_ON_ADD=false.
 	PinOnAdd      bool
 	Timeout       time.Duration
 	SkipUpload    bool // compute CIDs only; do not connect to or upload to IPFS
@@ -114,9 +118,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("IPFS_API_ADDR"); v != "" {
 		c.IPFS.APIAddr = v
 	}
-	if v := os.Getenv("IPFS_PIN_ON_ADD"); v == "true" || v == "1" {
-		c.IPFS.PinOnAdd = true
-	}
+	// IPFS_PIN_ON_ADD is parsed in applyDefaults so that pinning defaults to on
+	// (true) when the variable is unset, while still honouring an explicit
+	// IPFS_PIN_ON_ADD=false opt-out.
 	if v := os.Getenv("IPFS_SKIP_UPLOAD"); v == "true" || v == "1" {
 		c.IPFS.SkipUpload = true
 	}
@@ -231,6 +235,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.IPFS.Timeout == 0 {
 		c.IPFS.Timeout = 30 * time.Second
+	}
+	// Pin epoch roots by default (archival GC protection); opt out explicitly.
+	c.IPFS.PinOnAdd = true
+	if v := os.Getenv("IPFS_PIN_ON_ADD"); v == "false" || v == "0" {
+		c.IPFS.PinOnAdd = false
 	}
 	if c.IPFS.UploadWorkers == 0 {
 		c.IPFS.UploadWorkers = 16

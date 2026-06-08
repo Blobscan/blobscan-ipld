@@ -33,7 +33,7 @@ is needed. Variables that are unset or empty fall back to the listed default.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `IPFS_API_ADDR` | conditional | — | IPFS HTTP RPC address. Accepts multiaddr (`/ip4/127.0.0.1/tcp/5001`) or plain URL. Required unless `IPFS_SKIP_UPLOAD=true` |
-| `IPFS_PIN_ON_ADD` | no | `false` | If `true`, recursively pins each epoch CID after uploading its blocks |
+| `IPFS_PIN_ON_ADD` | no | `true` | Recursively pins each epoch CID after uploading its blocks. On by default so an archival node's blocks are protected from `ipfs repo gc`. Set to `false` to opt out |
 | `IPFS_TIMEOUT` | no | `30s` | HTTP request timeout for all IPFS API calls |
 | `IPFS_SKIP_UPLOAD` | no | `false` | If `true`, skip all IPFS interaction. CIDs are still computed and saved to DB. `IPFS_API_ADDR` not required |
 | `IPFS_UPLOAD_WORKERS` | no | `16` | Parallel `block/put` requests per epoch. Lower if local IPFS saturates; raise for remote high-latency endpoints |
