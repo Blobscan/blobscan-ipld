@@ -411,6 +411,7 @@ func (c *Client) GetAllEpochs(ctx context.Context, network string) ([]EpochRecor
 // SummaryStats holds aggregate statistics for a network.
 type SummaryStats struct {
 	EpochCount         int64
+	EmptyEpochCount    int64 // epochs with blob_count = 0
 	FirstEpoch         uint64
 	LastEpoch          uint64
 	ExpectedEpochCount int64 // LastEpoch - FirstEpoch + 1; 0 when no epochs
@@ -434,6 +435,7 @@ func (c *Client) GetSummaryStats(ctx context.Context, network string) (SummarySt
 	err := c.pool.QueryRow(ctx, `
 		SELECT
 			COUNT(*)                                             AS epoch_count,
+			COUNT(*) FILTER (WHERE blob_count = 0)              AS empty_epoch_count,
 			COALESCE(MIN(epoch), 0)                              AS first_epoch,
 			COALESCE(MAX(epoch), 0)                              AS last_epoch,
 			COALESCE(MAX(epoch) - MIN(epoch) + 1, 0)            AS expected_count,
@@ -449,6 +451,7 @@ func (c *Client) GetSummaryStats(ctx context.Context, network string) (SummarySt
 		FROM ipld_epochs WHERE network = $1
 	`, network).Scan(
 		&s.EpochCount,
+		&s.EmptyEpochCount,
 		&s.FirstEpoch,
 		&s.LastEpoch,
 		&s.ExpectedEpochCount,

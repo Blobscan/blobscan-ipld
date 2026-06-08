@@ -893,12 +893,16 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 	}
 	printRow("Epochs", epochsLine)
 
-	// Blobs line: total + avg + peak.
+	// Blobs line: total + avg + peak; note empty epochs.
 	blobsLine := fmt.Sprintf("%s  (avg %.1f/epoch · peak %s in epoch %d)",
 		formatCount(stats.TotalBlobs),
 		stats.AvgBlobsPerEpoch,
 		formatCount(stats.MaxBlobsPerEpoch),
 		stats.MaxBlobsEpoch)
+	if stats.EmptyEpochCount > 0 {
+		blobsLine += fmt.Sprintf("  · %s empty epoch%s",
+			formatCount(stats.EmptyEpochCount), pluralS(stats.EmptyEpochCount))
+	}
 	printRow("Blobs", blobsLine)
 
 	// Size line: total + avg per epoch.
