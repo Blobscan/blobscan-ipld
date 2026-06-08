@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: blobscan
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ipld_mainnet
-      POSTGRES_MULTIPLE_DATABASES: ipld_sepolia
+      POSTGRES_MULTIPLE_DATABASES: ipld_sepolia,ipld_hoodi,ipld_gnosis
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-multiple-databases.sh:/docker-entrypoint-initdb.d/init-multiple-databases.sh:ro
@@ -86,10 +86,67 @@ services:
       CAR_DIR: "/car"
     command: ["run"]
 
+  hoodi:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    volumes:
+      - hoodi_data:/data
+      - hoodi_car:/car
+    ports:
+      - "127.0.0.1:8078:8080"
+    environment:
+      NETWORK_NAME: hoodi
+      BEACON_RPC: "${HOODI_BEACON_RPC:?HOODI_BEACON_RPC is required}"
+      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      BEACON_RATE_BURST: "32"
+      BEACON_429_BACKOFF: "1s"
+      BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)
+      POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_hoodi?sslmode=disable"
+      IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
+      DATA_DIR: "/data"
+      CAR_DIR: "/car"
+    command: ["run"]
+
+  gnosis:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ipfs:
+        condition: service_healthy
+    volumes:
+      - gnosis_data:/data
+      - gnosis_car:/car
+    ports:
+      - "127.0.0.1:8077:8080"
+    environment:
+      NETWORK_NAME: gnosis
+      BEACON_RPC: "${GNOSIS_BEACON_RPC:?GNOSIS_BEACON_RPC is required}"
+      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      BEACON_RATE_BURST: "32"
+      BEACON_429_BACKOFF: "1s"
+      BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)
+      POSTGRES_DSN: "postgres://blobscan:${POSTGRES_PASSWORD}@postgres:5432/ipld_gnosis?sslmode=disable"
+      IPFS_API_ADDR: "/dns4/ipfs/tcp/5001"
+      DATA_DIR: "/data"
+      CAR_DIR: "/car"
+    command: ["run"]
+
 volumes:
   postgres_data:
   ipfs_data:
+    name: ipfs_shared
   mainnet_data:
   mainnet_car:
   sepolia_data:
   sepolia_car:
+  hoodi_data:
+  hoodi_car:
+  gnosis_data:
+  gnosis_car:
