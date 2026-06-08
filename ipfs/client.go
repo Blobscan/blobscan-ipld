@@ -93,9 +93,12 @@ func normalizeAddr(addr string) string {
 
 // ─── Block API ────────────────────────────────────────────────────────────────
 
-// HasBlock checks whether a block with the given CID exists on the IPFS node.
+// HasBlock checks whether a block with the given CID exists locally on the IPFS
+// node. It uses block/stat with offline=true, so it never triggers a network
+// fetch — a false result means the block is genuinely absent from the local
+// datastore, not merely unreachable.
 func (c *Client) HasBlock(ctx context.Context, id cid.Cid) (bool, error) {
-	endpoint := fmt.Sprintf("%s/api/v0/block/stat?arg=%s", c.base, id.String())
+	endpoint := fmt.Sprintf("%s/api/v0/block/stat?arg=%s&offline=true", c.base, id.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return false, fmt.Errorf("ipfs: build block/stat request: %w", err)

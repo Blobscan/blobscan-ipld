@@ -646,7 +646,10 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 		done   int
 	)
 	total := len(todo)
-	var failedEpochs []uint64
+	var (
+		missingEpochs []uint64 // root block absent locally → needs backfill-ipfs
+		stuckEpochs   []uint64 // root present but pin failed → re-runnable (slow/deep block)
+	)
 	report := func() {
 		fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d  (%.0f%%, %d failed)   ",
 			done, total, float64(done)/float64(total)*100, failed)
@@ -657,11 +660,24 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 			defer wg.Done()
 			for j := range jobs {
 				err := pinWithRetry(ctx, ipfsClient, j.cid, pinTimeout, pinRetries)
+				// On failure, probe the root block locally (offline) to tell a
+				// genuinely-missing epoch from a slow/transient pin.
+				rootMissing := false
+				if err != nil && ctx.Err() == nil {
+					pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+					present, herr := ipfsClient.HasBlock(pctx, j.cid)
+					cancel()
+					rootMissing = herr == nil && !present
+				}
 				mu.Lock()
 				done++
 				if err != nil {
 					failed++
-					failedEpochs = append(failedEpochs, j.epoch)
+					if rootMissing {
+						missingEpochs = append(missingEpochs, j.epoch)
+					} else {
+						stuckEpochs = append(stuckEpochs, j.epoch)
+					}
 				} else {
 					pinned++
 				}
@@ -677,12 +693,21 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
 
-	if len(failedEpochs) > 0 {
-		sortUint64(failedEpochs)
-		log.Warn("some epochs could not be pinned; re-run pin-existing to retry them",
-			"failed", len(failedEpochs), "first_failed", firstN(failedEpochs, 10))
+	if len(stuckEpochs) > 0 {
+		sortUint64(stuckEpochs)
+		log.Warn("pin failed but root block is present locally (node slow, or a deep block is missing); re-run pin-existing to retry",
+			"count", len(stuckEpochs), "first", firstN(stuckEpochs, 10))
 	}
-	log.Info("pin-existing complete", "pinned", pinned, "failed", failed)
+	if len(missingEpochs) > 0 {
+		sortUint64(missingEpochs)
+		log.Warn("root block absent from local datastore; these need re-upload via backfill-ipfs, not pinning",
+			"count", len(missingEpochs), "first", firstN(missingEpochs, 10))
+	}
+	log.Info("pin-existing complete",
+		"pinned", pinned,
+		"failed", failed,
+		"retryable", len(stuckEpochs),
+		"needs_backfill", len(missingEpochs))
 	if failed > 0 {
 		os.Exit(1)
 	}
