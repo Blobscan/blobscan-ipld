@@ -661,6 +661,35 @@ func (c *Client) GetBlobRefs(ctx context.Context, network string, fromEpoch, toE
 	return out, rows.Err()
 }
 
+// GetCorruptedEpochs returns epochs whose ipld_epochs row has blob_count=0
+// but whose ipld_blobs rows have actual blobs — i.e. epochs that were
+// incorrectly saved as empty and need to be rebuilt from the DB cache.
+func (c *Client) GetCorruptedEpochs(ctx context.Context, network string) ([]uint64, error) {
+	rows, err := c.pool.Query(ctx,
+		`SELECT e.epoch
+		 FROM ipld_epochs e
+		 JOIN ipld_blobs b ON b.epoch = e.epoch AND b.network = e.network
+		 WHERE e.network = $1 AND e.blob_count = 0
+		 GROUP BY e.epoch
+		 HAVING COUNT(b.commitment) > 0
+		 ORDER BY e.epoch`,
+		network,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("db: get corrupted epochs: %w", err)
+	}
+	defer rows.Close()
+	var out []uint64
+	for rows.Next() {
+		var epoch uint64
+		if err := rows.Scan(&epoch); err != nil {
+			return nil, fmt.Errorf("db: scan corrupted epoch: %w", err)
+		}
+		out = append(out, epoch)
+	}
+	return out, rows.Err()
+}
+
 func (c *Client) GetBlobsByEpoch(ctx context.Context, network string, epoch uint64) ([]BlobRecord, error) {
 	rows, err := c.pool.Query(ctx,
 		`SELECT commitment, data_cid, meta_cid, blob_index,

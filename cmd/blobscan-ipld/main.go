@@ -49,6 +49,7 @@ Subcommands:
   pin-existing     Recursively pin epoch roots from the DB that are not yet pinned (GC protection)
   export-blob-refs Export blob CID references as CSV for import into blobscan DB
   summary          Show indexed-data statistics (use -help for detail flags)
+  repair-epochs    Rebuild epoch nodes from DB cache for epochs saved with blob_count=0 by mistake
 
 Global flags (before subcommand):
   -log-level <level>  Log level: debug, info, warn, error (default: info)
@@ -73,6 +74,8 @@ Examples:
   blobscan-ipld export-blob-refs -meta -out /tmp/refs.csv
   blobscan-ipld summary
   blobscan-ipld summary -gaps -top 10 -monthly -check-ipfs
+  blobscan-ipld repair-epochs
+  blobscan-ipld repair-epochs -dry-run
 `
 
 func main() {
@@ -157,6 +160,8 @@ func main() {
 		cmdExportBlobRefs(ctx, cfg, log, subArgs)
 	case "summary":
 		cmdSummary(ctx, cfg, subArgs)
+	case "repair-epochs":
+		cmdRepairEpochs(ctx, cfg, log, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", subcommand, usage)
 		os.Exit(1)
@@ -1042,6 +1047,73 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 // checkEpochsInIPFS reports how many epoch root CIDs are present on the IPFS
 // node and which epochs are missing.
 //
+// repair-epochs: rebuild ipld_epochs rows that were incorrectly saved with
+// blob_count=0 by reconstructing the epoch node from cached ipld_blobs rows.
+// This fixes epochs that the beacon can no longer serve (beyond retention window)
+// but whose blob data is intact in the DB.
+func cmdRepairEpochs(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
+	fs := flag.NewFlagSet("repair-epochs", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "print corrupted epochs without repairing them")
+	fs.Parse(args)
+
+	if cfg.Storage.PostgresDSN == "" {
+		fmt.Fprintln(os.Stderr, "repair-epochs: postgres_dsn is required")
+		os.Exit(1)
+	}
+
+	dbClient, err := db.New(ctx, cfg.Storage.PostgresDSN)
+	if err != nil {
+		log.Error("failed to connect to postgres", "err", err)
+		os.Exit(1)
+	}
+	defer dbClient.Close()
+
+	epochs, err := dbClient.GetCorruptedEpochs(ctx, cfg.Network.Name)
+	if err != nil {
+		log.Error("failed to query corrupted epochs", "err", err)
+		os.Exit(1)
+	}
+
+	if len(epochs) == 0 {
+		log.Info("no corrupted epochs found")
+		return
+	}
+
+	log.Info("corrupted epochs found", "count", len(epochs), "first", epochs[0], "last", epochs[len(epochs)-1])
+
+	if *dryRun {
+		for _, e := range epochs {
+			fmt.Printf("%d\n", e)
+		}
+		return
+	}
+
+	gen, err := generator.New(ctx, cfg, log)
+	if err != nil {
+		log.Error("failed to create generator", "err", err)
+		os.Exit(1)
+	}
+
+	ok, failed := 0, 0
+	for _, epoch := range epochs {
+		if ctx.Err() != nil {
+			break
+		}
+		if err := gen.FinalizeEpoch(ctx, epoch); err != nil {
+			log.Error("failed to repair epoch", "epoch", epoch, "err", err)
+			failed++
+			continue
+		}
+		log.Info("epoch repaired", "epoch", epoch)
+		ok++
+	}
+
+	log.Info("repair complete", "repaired", ok, "failed", failed)
+	if failed > 0 {
+		os.Exit(1)
+	}
+}
+
 // Fast path: fetch the node's recursive pin set in a single pin/ls request and
 // resolve every epoch with an in-memory lookup — O(1) HTTP regardless of epoch
 // count. This works because epoch roots are pinned on upload (see
