@@ -44,6 +44,7 @@ Subcommands:
   export-car       Export a CAR v2 file for a single epoch from the DB
   export-car-range Export a single CAR v2 file covering a range of epochs
   backfill-ipfs    Re-fetch blob data from beacon and upload historical epochs to IPFS
+  pin-existing     Recursively pin epoch roots from the DB that are not yet pinned (GC protection)
   export-blob-refs Export blob CID references as CSV for import into blobscan DB
   summary          Show indexed-data statistics (use -help for detail flags)
 
@@ -63,6 +64,8 @@ Examples:
   blobscan-ipld -from 300000 -to 300099 -out /tmp/range.car export-car-range
   blobscan-ipld backfill-ipfs
   blobscan-ipld backfill-ipfs -from 300000 -to 300099
+  blobscan-ipld pin-existing
+  blobscan-ipld pin-existing -dry-run
   blobscan-ipld export-blob-refs -out /tmp/refs.csv
   blobscan-ipld export-blob-refs -from 300000 -to 300099
   blobscan-ipld export-blob-refs -meta -out /tmp/refs.csv
@@ -126,6 +129,8 @@ func main() {
 		cmdExportCARRange(ctx, cfg, log, subArgs)
 	case "backfill-ipfs":
 		cmdBackfillIPFS(ctx, cfg, log, subArgs)
+	case "pin-existing":
+		cmdPinExisting(ctx, cfg, log, subArgs)
 	case "export-blob-refs":
 		cmdExportBlobRefs(ctx, cfg, log, subArgs)
 	case "summary":
@@ -526,6 +531,141 @@ func cmdBackfillIPFS(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 
 	if err := gen.BackfillIPFS(ctx, from, to); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("backfill-ipfs failed", "err", err)
+		os.Exit(1)
+	}
+}
+
+// pin-existing: recursively pin every epoch root recorded in the DB that is not
+// already pinned. Use this once after enabling pinning to protect epochs that
+// were uploaded before IPFS_PIN_ON_ADD defaulted to true (their blocks are in
+// the datastore but unpinned, so `ipfs repo gc` could collect them). It only
+// pins roots already present on the node; it does not re-upload missing data —
+// use backfill-ipfs for that.
+func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
+	fs := flag.NewFlagSet("pin-existing", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "report what would be pinned without pinning")
+	_ = fs.Parse(args)
+
+	if cfg.Storage.PostgresDSN == "" {
+		fmt.Fprintln(os.Stderr, "pin-existing: postgres_dsn is required")
+		os.Exit(1)
+	}
+	if cfg.IPFS.SkipUpload || cfg.IPFS.APIAddr == "" {
+		fmt.Fprintln(os.Stderr, "pin-existing: IPFS must be configured (skip_upload=false and api_addr set)")
+		os.Exit(1)
+	}
+
+	dbClient, err := db.New(ctx, cfg.Storage.PostgresDSN)
+	if err != nil {
+		log.Error("failed to connect to postgres", "err", err)
+		os.Exit(1)
+	}
+	defer dbClient.Close()
+
+	records, err := dbClient.GetAllEpochs(ctx, cfg.Network.Name)
+	if err != nil {
+		log.Error("failed to load epochs", "err", err)
+		os.Exit(1)
+	}
+	if len(records) == 0 {
+		log.Info("no epochs in DB, nothing to pin")
+		return
+	}
+
+	ipfsClient, err := newIPFSClientFromConfig(cfg)
+	if err != nil {
+		log.Error("failed to create IPFS client", "err", err)
+		os.Exit(1)
+	}
+
+	// Fetch the current pin set once so already-pinned epochs are skipped
+	// cheaply rather than issuing a redundant pin/add for each.
+	pins, err := ipfsClient.ListRecursivePins(ctx)
+	if err != nil {
+		log.Warn("could not list existing pins; will attempt to pin every epoch", "err", err)
+		pins = map[string]struct{}{}
+	}
+
+	// Collect the epochs that still need pinning.
+	type pinJob struct {
+		epoch uint64
+		cid   cid.Cid
+	}
+	var todo []pinJob
+	badCIDs := 0
+	for _, rec := range records {
+		c, err := cid.Decode(rec.CID)
+		if err != nil {
+			badCIDs++
+			continue
+		}
+		if _, ok := pins[c.String()]; ok {
+			continue
+		}
+		todo = append(todo, pinJob{epoch: rec.Epoch, cid: c})
+	}
+
+	alreadyPinned := len(records) - len(todo) - badCIDs
+	log.Info("pin-existing scan complete",
+		"epochs", len(records),
+		"already_pinned", alreadyPinned,
+		"to_pin", len(todo),
+		"unparseable_cids", badCIDs)
+
+	if *dryRun {
+		log.Info("dry-run: no pins performed")
+		return
+	}
+	if len(todo) == 0 {
+		log.Info("all epochs already pinned")
+		return
+	}
+
+	// Pin in parallel. pin/add is recursive; epoch roots are small DAGs.
+	workers := cfg.IPFS.UploadWorkers
+	if workers <= 0 {
+		workers = 16
+	}
+	jobs := make(chan pinJob, len(todo))
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		pinned int
+		failed int
+		done   int
+	)
+	total := len(todo)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				err := ipfsClient.Pin(ctx, j.cid)
+				mu.Lock()
+				done++
+				cur := done
+				if err != nil {
+					failed++
+					log.Warn("pin failed", "epoch", j.epoch, "cid", j.cid, "err", err)
+				} else {
+					pinned++
+				}
+				mu.Unlock()
+				if cur == total || cur%20 == 0 {
+					fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d epochs   ", cur, total)
+				}
+			}
+		}()
+	}
+	for _, j := range todo {
+		jobs <- j
+	}
+	close(jobs)
+	wg.Wait()
+	fmt.Fprintln(os.Stderr)
+
+	log.Info("pin-existing complete", "pinned", pinned, "failed", failed)
+	if failed > 0 {
 		os.Exit(1)
 	}
 }

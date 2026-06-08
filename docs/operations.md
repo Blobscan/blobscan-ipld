@@ -908,6 +908,23 @@ ipfs pin add -r <EpochNodeCID>
 
 ### Pin all epochs for a network (batch)
 
+The `pin-existing` subcommand pins every epoch root in the DB that is not
+already pinned. Use it once after upgrading to the pinning-on-by-default build
+to protect epochs uploaded earlier (their blocks are in the datastore but
+unpinned, so `ipfs repo gc` could collect them):
+
+```bash
+blobscan-ipld pin-existing            # pin all not-yet-pinned epoch roots
+blobscan-ipld pin-existing -dry-run   # report counts without pinning
+```
+
+It fetches the current pin set once (`pin/ls?type=recursive`) and skips
+already-pinned epochs, then pins the rest in parallel (`IPFS_UPLOAD_WORKERS`).
+It only pins roots already present on the node — it does **not** re-upload
+missing data; use `backfill-ipfs` for that.
+
+Equivalent shell one-liner, if you prefer driving Kubo directly:
+
 ```bash
 # Generate pin commands from the database and execute them:
 psql "$DSN" -t -c "SELECT cid FROM ipld_epochs WHERE network = 'mainnet' ORDER BY epoch" \
