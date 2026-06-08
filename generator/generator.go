@@ -593,7 +593,7 @@ func (g *Generator) runBackfillPipeline(
 
 // builtEpoch carries the fetch+build output of one epoch across the pipeline
 // boundary. epochBS is nil when IPFS upload is disabled; empty (Blobs == 0)
-// epochs are signalled with the empty sentinel and skipped by persistEpoch.
+// epochs are signalled with the empty sentinel and persisted as zero-blob rows.
 type builtEpoch struct {
 	epoch       uint64
 	epochInp    types.EpochInput
@@ -601,7 +601,7 @@ type builtEpoch struct {
 	epochResult types.EpochResult
 	epochBS     *store.MemBlockstore
 	fromCache   bool
-	empty       bool // epoch had no blobs; nothing to persist
+	empty       bool // epoch had no blobs; a zero-blob EpochNode is built at persist time
 }
 
 // buildEpoch performs the CPU + beacon-bound stage of processing one epoch:
@@ -708,6 +708,34 @@ func (g *Generator) buildEpoch(ctx context.Context, epoch uint64, p *epochProgre
 // callers serialize persistEpoch invocations to preserve cursor monotonicity.
 func (g *Generator) persistEpoch(ctx context.Context, be builtEpoch) error {
 	if be.empty {
+		if g.db == nil {
+			return nil
+		}
+		// Epoch had no blobs (e.g. early post-Dencun epochs). Build a zero-blob
+		// EpochNode so the DB row exists and gap detection doesn't flag it.
+		var lsys ipld.LinkSystem
+		var emptyBS *store.MemBlockstore
+		if g.ipfs != nil {
+			emptyBS = store.NewMemBlockstore()
+			lsys = store.NewLinkSystem(emptyBS)
+		} else {
+			lsys = store.NewLinkSystem(store.NullBlockstore{})
+		}
+		emptyInp := types.EpochInput{Epoch: be.epoch, Slot: be.epoch * 32}
+		epochResult, err := builder.BuildEpochNode(ctx, lsys, emptyInp, nil, g.cfg.Network.Name, g.cfg.Generator.HAMTThreshold)
+		if err != nil {
+			return fmt.Errorf("build empty epoch node %d: %w", be.epoch, err)
+		}
+		if emptyBS != nil {
+			if err := g.uploadAndPin(ctx, emptyBS, epochResult.CID, be.epoch); err != nil {
+				return err
+			}
+		}
+		epochTime := beacon.SlotTime(g.genesisTime, be.epoch*32)
+		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, 0, epochTime); err != nil {
+			return fmt.Errorf("save empty epoch %d to db: %w", be.epoch, err)
+		}
+		g.log.Info("empty epoch saved", "epoch", be.epoch, "cid", epochResult.CID)
 		return nil
 	}
 	if be.epochBS != nil {
