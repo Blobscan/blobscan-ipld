@@ -325,10 +325,11 @@ func (g *Generator) processLiveTick(ctx context.Context) error {
 		if err := g.state.SetLastProcessedEpoch(ctx, epoch); err != nil {
 			return fmt.Errorf("generator: set live cursor %d: %w", epoch, err)
 		}
-		g.log.Debug("rebuilding network root", "epoch", epoch)
-		if err := g.rebuildNetworkRoot(ctx); err != nil {
-			g.log.Warn("network root rebuild failed (non-fatal)", "epoch", epoch, "err", err)
-		}
+	}
+
+	g.log.Debug("rebuilding network root", "through_epoch", finalizedEpoch)
+	if err := g.rebuildNetworkRoot(ctx); err != nil {
+		g.log.Warn("network root rebuild failed (non-fatal)", "epoch", finalizedEpoch, "err", err)
 	}
 
 	return nil

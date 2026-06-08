@@ -634,13 +634,13 @@ type BlobRef struct {
 // GetBlobRefs streams all (versioned_hash, data_cid, meta_cid) tuples for
 // blobs in the epoch range [fromEpoch, toEpoch]. Results are ordered by epoch
 // and blob_index so the output is deterministic.
-func (c *Client) GetBlobRefs(ctx context.Context, fromEpoch, toEpoch uint64) ([]BlobRef, error) {
+func (c *Client) GetBlobRefs(ctx context.Context, network string, fromEpoch, toEpoch uint64) ([]BlobRef, error) {
 	rows, err := c.pool.Query(ctx,
 		`SELECT versioned_hash, data_cid, meta_cid
 		 FROM ipld_blobs
-		 WHERE epoch >= $1 AND epoch <= $2
+		 WHERE network = $1 AND epoch >= $2 AND epoch <= $3
 		 ORDER BY epoch, blob_index`,
-		fromEpoch, toEpoch,
+		network, fromEpoch, toEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("db: get blob refs [%d,%d]: %w", fromEpoch, toEpoch, err)

@@ -784,7 +784,7 @@ func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger
 		*toEpoch = maxEpoch
 	}
 
-	refs, err := dbClient.GetBlobRefs(ctx, *fromEpoch, *toEpoch)
+	refs, err := dbClient.GetBlobRefs(ctx, cfg.Network.Name, *fromEpoch, *toEpoch)
 	if err != nil {
 		log.Error("failed to query blob refs", "err", err)
 		os.Exit(1)
