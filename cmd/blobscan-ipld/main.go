@@ -64,6 +64,7 @@ Examples:
   blobscan-ipld backfill-ipfs -from 300000 -to 300099
   blobscan-ipld export-blob-refs -out /tmp/refs.csv
   blobscan-ipld export-blob-refs -from 300000 -to 300099
+  blobscan-ipld export-blob-refs -meta -out /tmp/refs.csv
   blobscan-ipld summary
   blobscan-ipld summary -gaps -top 10 -monthly -check-ipfs
 `
@@ -535,6 +536,7 @@ func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger
 	fromEpoch := fs.Uint64("from", 0, "first epoch to export (default: 0)")
 	toEpoch := fs.Uint64("to", 0, "last epoch to export (default: max epoch in DB)")
 	outPath := fs.String("out", "", "output CSV file path (default: stdout)")
+	includeMeta := fs.Bool("meta", false, "include meta_reference column in output")
 	_ = fs.Parse(args)
 
 	if cfg.Storage.PostgresDSN == "" {
@@ -579,13 +581,20 @@ func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger
 	}
 
 	w := csv.NewWriter(out)
-	// Header matches blobscan's blob_data_storage_reference columns.
-	if err := w.Write([]string{"blob_hash", "storage", "data_reference", "meta_reference"}); err != nil {
+	header := []string{"blob_hash", "storage", "data_reference"}
+	if *includeMeta {
+		header = append(header, "meta_reference")
+	}
+	if err := w.Write(header); err != nil {
 		log.Error("failed to write CSV header", "err", err)
 		os.Exit(1)
 	}
 	for _, ref := range refs {
-		if err := w.Write([]string{ref.VersionedHash, "ipfs", ref.DataCID, ref.MetaCID}); err != nil {
+		row := []string{ref.VersionedHash, "ipfs", ref.DataCID}
+		if *includeMeta {
+			row = append(row, ref.MetaCID)
+		}
+		if err := w.Write(row); err != nil {
 			log.Error("failed to write CSV row", "err", err)
 			os.Exit(1)
 		}
