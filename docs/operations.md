@@ -113,6 +113,72 @@ docker compose -f docker-compose.sepolia.yml ps
 | IPFS gateway | `8081` | HTTP |
 | IPFS swarm | `4001` | TCP/UDP |
 
+### Migrating volumes to another machine
+
+To transfer your PostgreSQL, IPFS, and application data to another machine:
+
+#### On the source machine:
+
+```bash
+# Create backup directory
+mkdir -p ~/docker-volumes-backup
+
+# Export volumes using docker-compose
+docker-compose run --rm -v ~/docker-volumes-backup:/backup postgres \
+  tar czf /backup/postgres_data.tar.gz -C /var/lib/postgresql/data .
+
+docker-compose run --rm -v ~/docker-volumes-backup:/backup ipfs \
+  tar czf /backup/ipfs_data.tar.gz -C /data/ipfs .
+
+docker-compose run --rm -v ~/docker-volumes-backup:/backup blobscan-ipld \
+  tar czf /backup/blobscan_data.tar.gz -C /data .
+
+docker-compose run --rm -v ~/docker-volumes-backup:/backup blobscan-ipld \
+  tar czf /backup/blobscan_car.tar.gz -C /car .
+
+# Verify exports
+ls -lh ~/docker-volumes-backup/
+```
+
+#### Transfer to the destination machine:
+
+```bash
+# Copy backups and docker-compose files
+scp -r ~/docker-volumes-backup user@dest-machine:/path/to/blobscan-ipld/
+scp docker-compose*.yml user@dest-machine:/path/to/blobscan-ipld/
+```
+
+#### On the destination machine:
+
+```bash
+cd /path/to/blobscan-ipld
+
+# Create empty volumes first
+docker-compose up -d
+docker-compose down
+
+# Import the data
+docker-compose run --rm -v ~/docker-volumes-backup:/backup postgres \
+  tar xzf /backup/postgres_data.tar.gz -C /var/lib/postgresql/data
+
+docker-compose run --rm -v ~/docker-volumes-backup:/backup ipfs \
+  tar xzf /backup/ipfs_data.tar.gz -C /data/ipfs
+
+docker-compose run --rm -v ~/docker-volumes-backup:/backup blobscan-ipld \
+  tar xzf /backup/blobscan_data.tar.gz -C /data
+
+docker-compose run --rm -v ~/docker-volumes-backup:/backup blobscan-ipld \
+  tar xzf /backup/blobscan_car.tar.gz -C /car
+
+# Start services with restored data
+docker-compose up -d
+docker-compose ps
+```
+
+This exports all four volumes (`postgres_data`, `ipfs_data`, `blobscan_data`,
+`blobscan_car`) as compressed tarballs, transfers them to the new machine,
+and restores them into fresh volumes before startup.
+
 ### GitHub Container Registry
 
 Pre-built images are published to `ghcr.io/blobscan/blobscan-ipld` on every
