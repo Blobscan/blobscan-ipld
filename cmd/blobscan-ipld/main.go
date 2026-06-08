@@ -544,7 +544,20 @@ func cmdBackfillIPFS(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
 	fs := flag.NewFlagSet("pin-existing", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "report what would be pinned without pinning")
+	workersFlag := fs.Int("workers", 4, "parallel pin/add requests (recursive pinning is heavy; keep low to avoid saturating the node)")
+	timeoutFlag := fs.Duration("pin-timeout", 2*time.Minute, "per-pin timeout; a recursive pin/add exceeding this is retried")
+	retriesFlag := fs.Int("retries", 2, "retry attempts per epoch on transient pin failure")
 	_ = fs.Parse(args)
+
+	workers := *workersFlag
+	if workers <= 0 {
+		workers = 1
+	}
+	pinTimeout := *timeoutFlag
+	pinRetries := *retriesFlag
+	if pinRetries < 0 {
+		pinRetries = 0
+	}
 
 	if cfg.Storage.PostgresDSN == "" {
 		fmt.Fprintln(os.Stderr, "pin-existing: postgres_dsn is required")
@@ -621,11 +634,9 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 		return
 	}
 
-	// Pin in parallel. pin/add is recursive; epoch roots are small DAGs.
-	workers := cfg.IPFS.UploadWorkers
-	if workers <= 0 {
-		workers = 16
-	}
+	// Pin in parallel. Recursive pin/add is heavier than block upload (Kubo
+	// walks the DAG), so default to a gentler concurrency than UploadWorkers
+	// to avoid saturating the node; override with -workers.
 	jobs := make(chan pinJob, len(todo))
 	var (
 		wg     sync.WaitGroup
@@ -635,25 +646,27 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 		done   int
 	)
 	total := len(todo)
+	var failedEpochs []uint64
+	report := func() {
+		fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d  (%.0f%%, %d failed)   ",
+			done, total, float64(done)/float64(total)*100, failed)
+	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				err := ipfsClient.Pin(ctx, j.cid)
+				err := pinWithRetry(ctx, ipfsClient, j.cid, pinTimeout, pinRetries)
 				mu.Lock()
 				done++
-				cur := done
 				if err != nil {
 					failed++
-					log.Warn("pin failed", "epoch", j.epoch, "cid", j.cid, "err", err)
+					failedEpochs = append(failedEpochs, j.epoch)
 				} else {
 					pinned++
 				}
+				report()
 				mu.Unlock()
-				if cur == total || cur%20 == 0 {
-					fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d epochs   ", cur, total)
-				}
 			}
 		}()
 	}
@@ -664,10 +677,42 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
 
+	if len(failedEpochs) > 0 {
+		sortUint64(failedEpochs)
+		log.Warn("some epochs could not be pinned; re-run pin-existing to retry them",
+			"failed", len(failedEpochs), "first_failed", firstN(failedEpochs, 10))
+	}
 	log.Info("pin-existing complete", "pinned", pinned, "failed", failed)
 	if failed > 0 {
 		os.Exit(1)
 	}
+}
+
+// pinWithRetry pins cid, retrying transient failures with a fresh per-attempt
+// deadline. Recursive pin/add has no client-side timeout (see ipfs.Client), so
+// each attempt is bounded by perAttempt to avoid hanging on a stuck pin.
+func pinWithRetry(ctx context.Context, ipfsClient *ipfs.Client, c cid.Cid, perAttempt time.Duration, retries int) error {
+	var err error
+	for attempt := 0; attempt <= retries; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		actx, cancel := context.WithTimeout(ctx, perAttempt)
+		err = ipfsClient.Pin(actx, c)
+		cancel()
+		if err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// firstN returns up to n elements of s, for compact log output.
+func firstN(s []uint64, n int) []uint64 {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // export-blob-refs: export blob CID references as CSV importable into blobscan's

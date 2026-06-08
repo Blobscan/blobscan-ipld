@@ -918,10 +918,25 @@ blobscan-ipld pin-existing            # pin all not-yet-pinned epoch roots
 blobscan-ipld pin-existing -dry-run   # report counts without pinning
 ```
 
-It fetches the current pin set once (`pin/ls?type=recursive`) and skips
-already-pinned epochs, then pins the rest in parallel (`IPFS_UPLOAD_WORKERS`).
-It only pins roots already present on the node — it does **not** re-upload
-missing data; use `backfill-ipfs` for that.
+It fetches the current pin set once (`pin/ls?type=recursive`), skips
+already-pinned epochs, then pins the rest in parallel, retrying transient
+failures. It only pins roots already present on the node — it does **not**
+re-upload missing data; use `backfill-ipfs` for that.
+
+Recursive `pin/add` is heavier than a block upload (Kubo walks the DAG), so it
+runs at a gentler default concurrency and is **not** bound by `IPFS_TIMEOUT`.
+Progress (`pinning: N/M (P%, F failed)`) prints to stderr. Flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-workers N` | `4` | Parallel `pin/add` requests. Raise cautiously; too many recursive pins saturate the node. |
+| `-pin-timeout D` | `2m` | Per-pin timeout; a pin exceeding it is retried. |
+| `-retries N` | `2` | Retry attempts per epoch on transient failure. |
+| `-dry-run` | `false` | Report counts without pinning. |
+
+The run is resumable: any epochs that still fail after retries are listed in a
+final warning, and re-running `pin-existing` skips everything already pinned and
+retries only the rest.
 
 Equivalent shell one-liner, if you prefer driving Kubo directly:
 

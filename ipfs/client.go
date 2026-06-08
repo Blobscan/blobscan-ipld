@@ -26,9 +26,10 @@ import (
 
 // Client is a minimal Kubo HTTP RPC client.
 type Client struct {
-	base          string // e.g. "http://127.0.0.1:5001"
-	http          *http.Client
-	timeout       time.Duration
+	base    string // e.g. "http://127.0.0.1:5001"
+	http    *http.Client
+	pinHTTP *http.Client // no hard Timeout; pin duration is controlled via context
+	timeout time.Duration
 	pinOnAdd      bool
 	uploadWorkers int
 }
@@ -65,8 +66,12 @@ func NewClient(apiAddr string, timeout time.Duration, pinOnAdd bool, uploadWorke
 	}
 
 	return &Client{
-		base:          base,
-		http:          &http.Client{Timeout: timeout, Transport: transport},
+		base: base,
+		http: &http.Client{Timeout: timeout, Transport: transport},
+		// pinHTTP shares the transport but has no hard Timeout: recursive
+		// pin/add can take far longer than the per-request IPFS_TIMEOUT (Kubo
+		// walks and may fetch the whole DAG). Callers bound it via context.
+		pinHTTP:       &http.Client{Transport: transport},
 		timeout:       timeout,
 		pinOnAdd:      pinOnAdd,
 		uploadWorkers: uploadWorkers,
@@ -295,7 +300,9 @@ func (c *Client) GetBlocks(ctx context.Context, bs *store.MemBlockstore, cids []
 
 // ─── Pin API ──────────────────────────────────────────────────────────────────
 
-// Pin recursively pins a CID on the IPFS node.
+// Pin recursively pins a CID on the IPFS node. It uses pinHTTP, which has no
+// hard client-side timeout — recursive pinning can be slow — so bound the call
+// with a context deadline if you need an upper limit.
 func (c *Client) Pin(ctx context.Context, c2 cid.Cid) error {
 	endpoint := fmt.Sprintf("%s/api/v0/pin/add?arg=%s&recursive=true", c.base, c2.String())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
@@ -303,7 +310,7 @@ func (c *Client) Pin(ctx context.Context, c2 cid.Cid) error {
 		return fmt.Errorf("ipfs: build pin/add request: %w", err)
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.pinHTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("ipfs: pin/add request: %w", err)
 	}
