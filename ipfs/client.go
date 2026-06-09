@@ -368,6 +368,47 @@ func (c *Client) Pin(ctx context.Context, c2 cid.Cid) error {
 	return nil
 }
 
+// VerifyLocal walks the DAG rooted at root using refs -r with offline=true and
+// confirms every reachable block is present in the local datastore. It never
+// touches the network: a missing child surfaces as an error naming the CID
+// rather than blocking on a bitswap fetch. Use this before Pin when the DAG is
+// expected to be fully local already (e.g. repair), so an absent block fails
+// fast instead of hanging on a recursive pin.
+func (c *Client) VerifyLocal(ctx context.Context, root cid.Cid) error {
+	endpoint := fmt.Sprintf("%s/api/v0/refs?arg=%s&recursive=true&unique=true&offline=true",
+		c.base, root.String())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("ipfs: build refs request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("ipfs: refs request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ipfs: refs HTTP %d: %s", resp.StatusCode, body)
+	}
+
+	// refs streams one JSON object per ref; an unresolvable child (missing
+	// locally, offline) is reported in the object's Err field.
+	dec := json.NewDecoder(resp.Body)
+	for dec.More() {
+		var ref struct {
+			Ref string `json:"Ref"`
+			Err string `json:"Err"`
+		}
+		if err := dec.Decode(&ref); err != nil {
+			return fmt.Errorf("ipfs: refs decode: %w", err)
+		}
+		if ref.Err != "" {
+			return fmt.Errorf("ipfs: block missing locally under %s: %s", root, ref.Err)
+		}
+	}
+	return nil
+}
+
 // ─── DAG API ──────────────────────────────────────────────────────────────────
 
 // DagStat returns the cumulative size of a DAG rooted at the given CID.

@@ -1057,13 +1057,26 @@ bitswap/DHT, potentially indefinitely if no reachable peer has it. The daemon's
 DHT/identify warnings are it trying (and failing) to find that block on the
 network. This is not a hang in our code; it is the pin waiting on the network.
 
-What protects against it:
-- The pin call is bounded by a 30s context timeout in `uploadAndPin`
-  (`generator.go`). A pin that exceeds it is logged as a non-fatal warning and
-  the epoch still gets saved. **Make sure your binary includes this fix** — if
-  an older image is running without it, the pin has no timeout and can hang for
-  hours.
-- The IPFS client now logs `ipfs: recursive pin starting` / `... complete` with
+Why a block can be missing during **repair specifically**: `repair-epochs`
+reconstructs the epoch node from the DB *without loading blob data*
+(`reconstructFromDB` sets `Data: nil`, keeping only the precomputed `DataCID`).
+So the repair upload writes the epoch root, blob **metadata**, and index nodes —
+but **not the blob data blocks**. The recursive pin then expects every `DataCID`
+to already be on the node. For epochs that were corrupted with `blob_count=0`,
+the original failure that zeroed the count often also skipped the data upload,
+so the data block is neither local nor on the network → the pin hangs forever.
+
+What protects against it (current code):
+- Before pinning, `uploadAndPin` calls `VerifyLocal` — `refs -r` with
+  `offline=true` — to confirm the whole DAG is present locally. If any block is
+  missing it logs `skipping pin: epoch DAG not fully present locally` naming the
+  CID and moves on, instead of hanging. Both verify and pin are bounded by a 30s
+  context timeout.
+- `SaveEpoch` in the repair loop runs on a context detached from cancellation
+  (`context.WithoutCancel`), so a Ctrl+C during the best-effort pin can no
+  longer poison the durable `blob_count` fix (previously this surfaced as
+  `save epoch: context canceled` and `repaired=0`).
+- The IPFS client logs `ipfs: recursive pin starting` / `... complete` with
   elapsed time (INFO), and `ipfs: block upload starting/complete` (DEBUG). If
   you see "starting" with no "complete", the pin is the culprit.
 
@@ -1076,11 +1089,24 @@ docker compose exec mainnet sh -c \
 
 # Watch recursive-pin timing live (rebuild the image first if needed):
 docker compose logs -f mainnet | grep "recursive pin"
+
+# Find the exact block the daemon is waiting on from the network right now:
+docker compose exec ipfs ipfs bitswap wantlist
+
+# Walk an epoch root locally; the first CID it cannot resolve is the missing one
+# (replace with the cid from the "pin epoch failed" log):
+docker compose exec ipfs ipfs refs -r --offline <epoch-root-cid>
+
+# Cross-check the epoch's blob data CIDs in Postgres:
+docker compose exec mainnet sh -c 'psql "$POSTGRES_DSN" -t -A -c \
+  "SELECT blob_index, data_cid FROM ipld_blobs WHERE network='\''mainnet'\'' AND epoch=<N>;"'
 ```
 
 Fixes:
-- Rebuild/redeploy so the running binary has the 30s pin timeout.
-- Ensure all child blocks were actually uploaded before pinning (a complete
-  `block upload` log precedes the pin).
+- Rebuild/redeploy so the running binary has the verify-before-pin guard.
+- If the missing block is a blob **data** block, the data was never uploaded for
+  that epoch. Re-upload it (e.g. `backfill-ipfs` for the epoch range, which
+  fetches blob data and uploads it) so the data block exists locally; then
+  `repair-epochs` can pin successfully.
 - If you do not want pins to wait on the network at all, pin offline or disable
   `pin_on_add` and pin separately (see [Pinning strategies](#pinning-strategies)).

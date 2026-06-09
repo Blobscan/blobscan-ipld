@@ -968,8 +968,15 @@ func (g *Generator) RepairEpochs(ctx context.Context, epochs []uint64, onDone fu
 			failed++
 			continue
 		}
+		// Persist the corrected row using a context detached from ctx's
+		// cancellation: an interrupt during the (best-effort) pin above must not
+		// lose the durable repair we just computed and uploaded. The blob_count
+		// fix is the whole point of repair-epochs; never drop it to a cancel.
+		saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
-		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobs), epochTime); err != nil {
+		err = g.db.SaveEpoch(saveCtx, g.cfg.Network.Name, epochResult, len(blobs), epochTime)
+		saveCancel()
+		if err != nil {
 			onDone(epoch, fmt.Errorf("save epoch: %w", err))
 			failed++
 			continue
@@ -1055,6 +1062,20 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 	}
 	g.log.Info("IPFS upload complete", "epoch", epoch, "blocks", total)
 	if g.cfg.IPFS.PinOnAdd {
+		// Verify the whole DAG is present locally before pinning. A recursive
+		// pin will otherwise block fetching any missing child over the network
+		// (potentially forever). The data blocks are expected to already be on
+		// the node, so a missing block is a real problem we want surfaced fast,
+		// not a network wait. Bounded with a short timeout independent of ctx so
+		// an interrupt here cannot poison the caller's context.
+		checkCtx, checkCancel := context.WithTimeout(ctx, 30*time.Second)
+		verifyErr := g.ipfs.VerifyLocal(checkCtx, epochCID)
+		checkCancel()
+		if verifyErr != nil {
+			g.log.Warn("skipping pin: epoch DAG not fully present locally (non-fatal)",
+				"epoch", epoch, "cid", epochCID, "err", verifyErr)
+			return nil
+		}
 		pinCtx, pinCancel := context.WithTimeout(ctx, 30*time.Second)
 		err := g.ipfs.Pin(pinCtx, epochCID)
 		pinCancel()
