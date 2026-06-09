@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -32,6 +33,23 @@ type Client struct {
 	timeout time.Duration
 	pinOnAdd      bool
 	uploadWorkers int
+	log           *slog.Logger
+}
+
+// SetLogger attaches a logger so the client can emit timing/progress for the
+// slow network operations (PutBlockstore, Pin). Optional; if never called the
+// client stays silent. Safe to call once right after NewClient.
+func (c *Client) SetLogger(log *slog.Logger) {
+	c.log = log
+}
+
+// logger returns a non-nil logger, falling back to a discard logger so call
+// sites don't need nil checks.
+func (c *Client) logger() *slog.Logger {
+	if c.log == nil {
+		return slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return c.log
 }
 
 // NewClient creates a new IPFS HTTP RPC client.
@@ -232,6 +250,9 @@ func (c *Client) PutBlockstore(ctx context.Context, bs *store.MemBlockstore, pro
 		workers = total
 	}
 
+	start := time.Now()
+	c.logger().Debug("ipfs: block upload starting", "blocks", total, "workers", workers)
+
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 
@@ -246,18 +267,25 @@ func (c *Client) PutBlockstore(ctx context.Context, bs *store.MemBlockstore, pro
 			if err := c.PutBlock(gctx, blk); err != nil {
 				return fmt.Errorf("ipfs: put block %d/%d (%s): %w", i+1, total, blk.Cid(), err)
 			}
+			mu.Lock()
+			done++
+			cur := done
+			mu.Unlock()
 			if fn != nil {
-				mu.Lock()
-				done++
-				cur := done
-				mu.Unlock()
 				fn(cur, total, blk.Cid().String())
 			}
 			return nil
 		})
 	}
 
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		c.logger().Warn("ipfs: block upload failed",
+			"blocks", total, "elapsed", time.Since(start).Round(time.Millisecond), "err", err)
+		return err
+	}
+	c.logger().Debug("ipfs: block upload complete",
+		"blocks", total, "elapsed", time.Since(start).Round(time.Millisecond))
+	return nil
 }
 
 // GetBlock fetches a single raw block from the IPFS node using /api/v0/block/get.
@@ -313,16 +341,30 @@ func (c *Client) Pin(ctx context.Context, c2 cid.Cid) error {
 		return fmt.Errorf("ipfs: build pin/add request: %w", err)
 	}
 
+	// pin/add?recursive walks the whole DAG and will block fetching any child
+	// block missing from the local datastore — potentially indefinitely if the
+	// peer holding it is unreachable. Log entry/exit with timing so a stuck pin
+	// is visible rather than silent.
+	start := time.Now()
+	c.logger().Info("ipfs: recursive pin starting", "cid", c2.String())
+
 	resp, err := c.pinHTTP.Do(req)
 	if err != nil {
+		c.logger().Warn("ipfs: recursive pin failed",
+			"cid", c2.String(), "elapsed", time.Since(start).Round(time.Millisecond), "err", err)
 		return fmt.Errorf("ipfs: pin/add request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		c.logger().Warn("ipfs: recursive pin HTTP error",
+			"cid", c2.String(), "status", resp.StatusCode,
+			"elapsed", time.Since(start).Round(time.Millisecond))
 		return fmt.Errorf("ipfs: pin/add HTTP %d: %s", resp.StatusCode, body)
 	}
+	c.logger().Info("ipfs: recursive pin complete",
+		"cid", c2.String(), "elapsed", time.Since(start).Round(time.Millisecond))
 	return nil
 }
 

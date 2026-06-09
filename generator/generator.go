@@ -75,6 +75,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 		if err != nil {
 			return nil, fmt.Errorf("generator: create ipfs client: %w", err)
 		}
+		ipfsClient.SetLogger(log)
 		log.Info("✓ IPFS upload enabled", "api_addr", cfg.IPFS.APIAddr, "pin_on_add", cfg.IPFS.PinOnAdd)
 	} else {
 		log.Info("⊘ IPFS upload disabled (skip_upload=true); CIDs will be computed but not uploaded")
@@ -926,10 +927,11 @@ func (g *Generator) FinalizeEpoch(ctx context.Context, epoch uint64) error {
 // once per epoch but defers the expensive network root rebuild to the end.
 func (g *Generator) RepairEpochs(ctx context.Context, epochs []uint64, onDone func(epoch uint64, err error)) (int, int) {
 	ok, failed := 0, 0
-	for _, epoch := range epochs {
+	for i, epoch := range epochs {
 		if ctx.Err() != nil {
 			break
 		}
+		g.log.Info("repairing epoch", "epoch", epoch, "progress", fmt.Sprintf("%d/%d", i+1, len(epochs)))
 		if g.db == nil {
 			onDone(epoch, fmt.Errorf("DB not configured"))
 			failed++

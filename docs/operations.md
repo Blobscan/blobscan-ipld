@@ -1041,3 +1041,46 @@ CIDs of previously-built nodes will differ. In that case you must either:
 - Accept that old and new ranges use different schemas (they remain valid IPLD).
 - Re-process historical epochs with `skip_existing_epochs: false` and
   `start_epoch: 0` to rebuild the entire DAG with the new format.
+
+## Troubleshooting
+
+### `repair-epochs` / generator appears stuck after "IPFS upload complete"
+
+Symptom: the process logs `IPFS upload complete` for an epoch and then makes no
+further progress for a long time, while the Kubo daemon shows continuous
+`dht/RtRefreshManager` and `failed to identify peer` activity.
+
+Cause: after uploading blocks, the generator issues a **recursive pin**
+(`pin/add?recursive=true`). A recursive pin walks the whole DAG and will block
+trying to fetch any child block that is missing from the local datastore — over
+bitswap/DHT, potentially indefinitely if no reachable peer has it. The daemon's
+DHT/identify warnings are it trying (and failing) to find that block on the
+network. This is not a hang in our code; it is the pin waiting on the network.
+
+What protects against it:
+- The pin call is bounded by a 30s context timeout in `uploadAndPin`
+  (`generator.go`). A pin that exceeds it is logged as a non-fatal warning and
+  the epoch still gets saved. **Make sure your binary includes this fix** — if
+  an older image is running without it, the pin has no timeout and can hang for
+  hours.
+- The IPFS client now logs `ipfs: recursive pin starting` / `... complete` with
+  elapsed time (INFO), and `ipfs: block upload starting/complete` (DEBUG). If
+  you see "starting" with no "complete", the pin is the culprit.
+
+To diagnose:
+```bash
+# Confirm the daemon is alive (API only accepts POST; a GET returns 405 — that
+# is NOT an outage):
+docker compose exec mainnet sh -c \
+  'wget -qO- --post-data= http://ipfs:5001/api/v0/version'
+
+# Watch recursive-pin timing live (rebuild the image first if needed):
+docker compose logs -f mainnet | grep "recursive pin"
+```
+
+Fixes:
+- Rebuild/redeploy so the running binary has the 30s pin timeout.
+- Ensure all child blocks were actually uploaded before pinning (a complete
+  `block upload` log precedes the pin).
+- If you do not want pins to wait on the network at all, pin offline or disable
+  `pin_on_add` and pin separately (see [Pinning strategies](#pinning-strategies)).
