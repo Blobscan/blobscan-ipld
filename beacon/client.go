@@ -4,6 +4,8 @@ package beacon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -293,9 +295,14 @@ func (c *Client) FetchEpochInput(ctx context.Context, epoch uint64, el ELClient)
 
 				idx, _ := strconv.Atoi(sc.Index)
 
+				versionedHash, err := kzgCommitmentToVersionedHash(sc.KZGCommitment)
+				if err != nil {
+					return fmt.Errorf("beacon: versioned hash slot %d: %w", slot, err)
+				}
+
 				bi := types.BlobInput{
 					Commitment:    sc.KZGCommitment,
-					VersionedHash: kzgCommitmentToVersionedHash(sc.KZGCommitment),
+					VersionedHash: versionedHash,
 					BlockHash:     sc.BlockRoot,
 					Slot:          slot,
 					Epoch:         epoch,
@@ -467,10 +474,14 @@ func hexVal(c byte) byte {
 }
 
 // kzgCommitmentToVersionedHash computes the EIP-4844 versioned hash from a
-// KZG commitment: SHA-256(commitment)[1:] with version byte 0x01 prepended.
-// This is a simplified version; production code should use crypto/sha256.
-func kzgCommitmentToVersionedHash(commitment string) string {
-	// In production, compute: 0x01 || SHA256(commitment_bytes)[1:]
-	// Here we return a placeholder that the caller can replace.
-	return "0x01" + commitment[4:] // placeholder
+// KZG commitment: VERSIONED_HASH_VERSION_KZG (0x01) || SHA256(commitment)[1:].
+// The commitment is a 0x-prefixed hex string (48 bytes / 96 hex chars).
+func kzgCommitmentToVersionedHash(commitment string) (string, error) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(commitment, "0x"))
+	if err != nil {
+		return "", fmt.Errorf("decode commitment %q: %w", commitment, err)
+	}
+	sum := sha256.Sum256(raw)
+	sum[0] = 0x01 // VERSIONED_HASH_VERSION_KZG
+	return "0x" + hex.EncodeToString(sum[:]), nil
 }
