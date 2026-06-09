@@ -544,6 +544,69 @@ func (c *Client) KeyList(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// ─── Node info / repo stat ────────────────────────────────────────────────────
+
+// RepoStat holds storage information from /api/v0/repo/stat.
+type RepoStat struct {
+	RepoSize   uint64 `json:"RepoSize"`
+	StorageMax uint64 `json:"StorageMax"`
+	NumObjects uint64 `json:"NumObjects"`
+}
+
+// GetRepoStat queries the IPFS node for its repository storage statistics.
+func (c *Client) GetRepoStat(ctx context.Context) (RepoStat, error) {
+	endpoint := fmt.Sprintf("%s/api/v0/repo/stat", c.base)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return RepoStat{}, fmt.Errorf("ipfs: build repo/stat request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return RepoStat{}, fmt.Errorf("ipfs: repo/stat request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return RepoStat{}, fmt.Errorf("ipfs: repo/stat HTTP %d: %s", resp.StatusCode, body)
+	}
+	var s RepoStat
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return RepoStat{}, fmt.Errorf("ipfs: repo/stat decode: %w", err)
+	}
+	return s, nil
+}
+
+// NodeInfo holds identity information from /api/v0/id.
+type NodeInfo struct {
+	ID              string   `json:"ID"`
+	AgentVersion    string   `json:"AgentVersion"`
+	ProtocolVersion string   `json:"ProtocolVersion"`
+	Addresses       []string `json:"Addresses"`
+}
+
+// GetNodeInfo queries the IPFS node for its peer identity and version.
+func (c *Client) GetNodeInfo(ctx context.Context) (NodeInfo, error) {
+	endpoint := fmt.Sprintf("%s/api/v0/id", c.base)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return NodeInfo{}, fmt.Errorf("ipfs: build id request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return NodeInfo{}, fmt.Errorf("ipfs: id request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return NodeInfo{}, fmt.Errorf("ipfs: id HTTP %d: %s", resp.StatusCode, body)
+	}
+	var n NodeInfo
+	if err := json.NewDecoder(resp.Body).Decode(&n); err != nil {
+		return NodeInfo{}, fmt.Errorf("ipfs: id decode: %w", err)
+	}
+	return n, nil
+}
+
 // ─── Codec / multihash name helpers ──────────────────────────────────────────
 
 func codecName(codec uint64) string {

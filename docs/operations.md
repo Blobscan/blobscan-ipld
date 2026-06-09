@@ -660,7 +660,9 @@ indexed without requiring any manual SQL queries.
   Data size        3.62 GiB  (avg 3.0 MiB/epoch)
   Time             2024-01-15T12:00:00Z → 2024-03-20T14:24:00Z  (65 days)
   Cursors          live=133841  backfill=133750
-  IPFS             use -check-ipfs to verify upload status
+  IPFS node        12D3Koo...  (kubo/0.29.0/...)
+  IPFS storage     3.58 GiB / 500.0 GiB  (0.7% used · 1,234,567 objects)
+  IPFS epochs      use -check-ipfs to verify upload status
 ```
 
 ### Flags
@@ -672,10 +674,12 @@ indexed without requiring any manual SQL queries.
 | `-top N` | Show the N epochs with the highest blob count as a table (epoch, blobs, size, time). |
 | `-monthly` | Show a month-by-month breakdown of indexed epochs, blobs, and data size. |
 
+The `IPFS node` and `IPFS storage` rows are always shown when the IPFS API is reachable — they query `/api/v0/id` and `/api/v0/repo/stat` respectively and display the peer ID, agent version, repo size, storage cap, and object count.
+
 **`-check-ipfs` detail:**
 
 ```
-  IPFS             1,231/1,234 epoch nodes present  (99.8%)
+  IPFS epochs      1,231/1,234 epoch nodes present  (99.8%)
                    missing: 132900 · 133100 · 133500
 ```
 

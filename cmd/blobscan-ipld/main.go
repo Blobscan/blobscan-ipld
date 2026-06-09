@@ -939,16 +939,38 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 	}
 	printRow("Cursors", cursorLine)
 
-	// ── IPFS check ────────────────────────────────────────────────────────────
-	if *checkIPFS {
-		if cfg.IPFS.SkipUpload || cfg.IPFS.APIAddr == "" {
-			printRow("IPFS", "⚠ not configured (skip_upload=true or no api_addr)")
+	// ── IPFS node info + optional epoch check ────────────────────────────────
+	if cfg.IPFS.SkipUpload || cfg.IPFS.APIAddr == "" {
+		printRow("IPFS", "⚠ not configured (skip_upload=true or no api_addr)")
+	} else {
+		const checkWorkers = 64
+		ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, false, checkWorkers)
+		if err != nil {
+			printRow("IPFS", fmt.Sprintf("⚠ cannot connect: %v", err))
 		} else {
-			const checkWorkers = 64
-			ipfsClient, err := ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, false, checkWorkers)
-			if err != nil {
-				printRow("IPFS", fmt.Sprintf("⚠ cannot connect: %v", err))
+			// Always show node identity and storage stats.
+			nodeInfo, niErr := ipfsClient.GetNodeInfo(ctx)
+			repoStat, rsErr := ipfsClient.GetRepoStat(ctx)
+			if niErr != nil {
+				printRow("IPFS node", fmt.Sprintf("⚠ id: %v", niErr))
 			} else {
+				printRow("IPFS node", fmt.Sprintf("%s  (%s)", nodeInfo.ID, nodeInfo.AgentVersion))
+			}
+			if rsErr != nil {
+				printRow("IPFS storage", fmt.Sprintf("⚠ repo/stat: %v", rsErr))
+			} else {
+				usedPct := 0.0
+				if repoStat.StorageMax > 0 {
+					usedPct = float64(repoStat.RepoSize) / float64(repoStat.StorageMax) * 100
+				}
+				printRow("IPFS storage", fmt.Sprintf("%s / %s  (%.1f%% used · %s objects)",
+					formatBytes(int64(repoStat.RepoSize)),
+					formatBytes(int64(repoStat.StorageMax)),
+					usedPct,
+					formatCount(int64(repoStat.NumObjects))))
+			}
+
+			if *checkIPFS {
 				present, missingEpochs := checkEpochsInIPFS(ctx, ipfsClient, dbClient, cfg.Network.Name, os.Stderr, checkWorkers)
 				total := present + int64(len(missingEpochs))
 				pct := 0.0
@@ -972,11 +994,11 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 					}
 					ipfsLine += "\n                  missing: " + strings.Join(labels, " · ") + suffix
 				}
-				printRow("IPFS", ipfsLine)
+				printRow("IPFS epochs", ipfsLine)
+			} else {
+				printRow("IPFS epochs", "use -check-ipfs to verify upload status")
 			}
 		}
-	} else {
-		printRow("IPFS", "use -check-ipfs to verify upload status")
 	}
 
 	// ── Gap detail ────────────────────────────────────────────────────────────
