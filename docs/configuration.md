@@ -47,7 +47,7 @@ is needed. Variables that are unset or empty fall back to the listed default.
 | `GENERATOR_WORKERS` | no | `16` | Parallel blob-processing goroutines. CID hashing is CPU-bound; set near vCPU count |
 | `GENERATOR_BEACON_WORKERS` | no | `16` | Parallel slot fetches per epoch. Each slot is one HTTP request; global cap is `BEACON_RATE_LIMIT` |
 | `BACKFILL_EPOCH_WORKERS` | no | `4` | Parallel epoch builders in the backfill pipeline. Each worker fetches+builds one epoch concurrently; the shared `BEACON_RATE_LIMIT` prevents exceeding RPC quotas. Increase for faster backfill on local nodes; decrease if hitting rate limits |
-| `GENERATOR_POLL_INTERVAL` | no | `12s` | How often to query the beacon node for new finalized epochs. One slot = 12s, one epoch = 6.4 min |
+| `GENERATOR_POLL_INTERVAL` | no | per-network | How often to query the beacon node for new finalized epochs. Defaults to one slot duration: `12s` for Ethereum networks, `5s` for Gnosis |
 | `GENERATOR_START_EPOCH` | no | network default | First epoch to process when starting from scratch. Defaults to the Dencun fork epoch for known networks (see table below). Set explicitly to resume from a specific epoch |
 | `GENERATOR_HAMT_THRESHOLD` | no | `5000` | If a single epoch has this many blobs or more, the blob index uses HAMT shards instead of a flat map |
 | `GENERATOR_SKIP_EXISTING_EPOCHS` | no | `false` | If `true` and a state file exists, start from `last_processed_epoch + 1` instead of `GENERATOR_START_EPOCH` |
@@ -68,6 +68,18 @@ first epoch containing blob sidecars for the configured network:
 
 For any other network name the value stays `0`; set `GENERATOR_START_EPOCH`
 explicitly if genesis-era slots predate EIP-4844.
+
+### Consensus layer chain parameters by network
+
+These are applied automatically from `NETWORK_NAME`. They affect slot-to-time
+conversion, epoch-to-slot arithmetic, and the `GENERATOR_POLL_INTERVAL` default:
+
+| `NETWORK_NAME` | Slots per epoch | Seconds per slot |
+|----------------|-----------------|------------------|
+| `mainnet`      | 32              | 12               |
+| `sepolia`      | 32              | 12               |
+| `hoodi`        | 32              | 12               |
+| `gnosis`       | **16**          | **5**            |
 
 ---
 

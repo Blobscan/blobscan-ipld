@@ -960,7 +960,7 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 			}
 			if *ipfsStat {
 				rsCtx, rsCancel := context.WithTimeout(ctx, 5*time.Minute)
-				repoStat, rsErr := ipfsClient.GetRepoStat(rsCtx)
+				repoStat, rsErr := ipfsClient.GetRepoStat(rsCtx, true)
 				rsCancel()
 				if rsErr != nil {
 					printRow("IPFS storage", fmt.Sprintf("⚠ repo/stat: %v", rsErr))
@@ -969,11 +969,10 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 					if repoStat.StorageMax > 0 {
 						usedPct = float64(repoStat.RepoSize) / float64(repoStat.StorageMax) * 100
 					}
-					printRow("IPFS storage", fmt.Sprintf("%s / %s  (%.1f%% used · %s objects)",
+					printRow("IPFS storage", fmt.Sprintf("%s / %s  (%.1f%% used)",
 						formatBytes(int64(repoStat.RepoSize)),
 						formatBytes(int64(repoStat.StorageMax)),
-						usedPct,
-						formatCount(int64(repoStat.NumObjects))))
+						usedPct))
 				}
 			} else {
 				printRow("IPFS storage", "use -ipfs-stat to query (slow on large repos)")
