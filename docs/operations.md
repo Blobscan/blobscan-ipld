@@ -608,7 +608,8 @@ The generator:
    IPFS, saves to DB, rebuilds `NetworkRoot`.
 
 Logs are written to stderr in structured text format. Use `-log-level debug`
-for verbose output including per-block operations.
+for verbose output including per-block operations and IPFS upload/pin progress
+(`IPFS upload complete`, `ipfs: recursive pin starting/complete`).
 
 ### Graceful shutdown
 
@@ -994,6 +995,9 @@ The generator logs structured key-value pairs to stderr with visual symbols for 
 | Epoch built (live) | ● | `INFO` | `cid`, `rpc_requests`, blob count |
 | Epoch built (backfill) | ■ | `INFO` | `cid`, `rpc_requests`, blob count |
 | IPFS upload disabled | ⊘ | `INFO` | — |
+| IPFS upload complete | — | `DEBUG` | `epoch`, `blocks` |
+| IPFS recursive pin starting | — | `DEBUG` | `cid` |
+| IPFS recursive pin complete | — | `DEBUG` | `cid`, `elapsed` |
 | No new finalized epochs | — | `DEBUG` | Finalized epoch, cursor |
 | Any processing error | ✗ | `ERROR` | Error details |
 

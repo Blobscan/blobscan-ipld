@@ -1060,7 +1060,7 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 	if err := g.ipfs.PutBlockstore(ctx, bs, progress); err != nil {
 		return fmt.Errorf("upload epoch %d to IPFS: %w", epoch, err)
 	}
-	g.log.Info("IPFS upload complete", "epoch", epoch, "blocks", total)
+	g.log.Debug("IPFS upload complete", "epoch", epoch, "blocks", total)
 	if g.cfg.IPFS.PinOnAdd {
 		// Verify the whole DAG is present locally before pinning. A recursive
 		// pin will otherwise block fetching any missing child over the network

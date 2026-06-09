@@ -346,7 +346,7 @@ func (c *Client) Pin(ctx context.Context, c2 cid.Cid) error {
 	// peer holding it is unreachable. Log entry/exit with timing so a stuck pin
 	// is visible rather than silent.
 	start := time.Now()
-	c.logger().Info("ipfs: recursive pin starting", "cid", c2.String())
+	c.logger().Debug("ipfs: recursive pin starting", "cid", c2.String())
 
 	resp, err := c.pinHTTP.Do(req)
 	if err != nil {
@@ -363,7 +363,7 @@ func (c *Client) Pin(ctx context.Context, c2 cid.Cid) error {
 			"elapsed", time.Since(start).Round(time.Millisecond))
 		return fmt.Errorf("ipfs: pin/add HTTP %d: %s", resp.StatusCode, body)
 	}
-	c.logger().Info("ipfs: recursive pin complete",
+	c.logger().Debug("ipfs: recursive pin complete",
 		"cid", c2.String(), "elapsed", time.Since(start).Round(time.Millisecond))
 	return nil
 }
