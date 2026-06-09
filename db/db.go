@@ -190,7 +190,7 @@ var blobsCopyColumns = []string{
 // Rows are bulk-loaded into a per-tx temp staging table via pgx's binary
 // CopyFrom path and then upserted into ipld_blobs with a single INSERT/SELECT,
 // turning ~N round-trips into 2 for an epoch with N blobs.
-func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, blobs []types.BlobInput, results []types.BlobResult, genesisTime time.Time) error {
+func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, blobs []types.BlobInput, results []types.BlobResult, genesisTime time.Time, secondsPerSlot uint64) error {
 	if len(blobs) != len(results) {
 		return fmt.Errorf("db: SaveBlobs: blobs/results length mismatch (%d vs %d)", len(blobs), len(results))
 	}
@@ -230,8 +230,8 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 	for i, inp := range blobs {
 		res := results[i]
 		var slotTime *time.Time
-		if !genesisTime.IsZero() {
-			t := genesisTime.Add(time.Duration(inp.Slot) * 12 * time.Second)
+		if !genesisTime.IsZero() && secondsPerSlot > 0 {
+			t := genesisTime.Add(time.Duration(inp.Slot) * time.Duration(secondsPerSlot) * time.Second)
 			slotTime = &t
 		}
 		rows[i] = []any{

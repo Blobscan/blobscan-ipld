@@ -1473,7 +1473,7 @@ func runTier1(ctx context.Context, cfg *config.Config, dbClient *db.Client, netw
 					continue
 				}
 
-				epochInp, blobResults, err := generator.ReconstructFromDB(j.e.Epoch, records)
+				epochInp, blobResults, err := generator.ReconstructFromDB(j.e.Epoch, records, cfg.Network.SlotsPerEpoch)
 				if err != nil {
 					r.metaBad = true
 					done.Add(1)

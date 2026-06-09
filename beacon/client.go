@@ -39,7 +39,9 @@ type Client struct {
 	lastBackoffTime time.Time     // last time we backed off from 429
 	backoffDuration time.Duration // current backoff duration
 	mu              sync.Mutex
-	rpcRequests     int64 // counter for total RPC requests made to beacon node
+	rpcRequests     int64  // counter for total RPC requests made to beacon node
+	slotsPerEpoch   uint64 // consensus slots per epoch (32 for Ethereum, 16 for Gnosis)
+	secondsPerSlot  uint64 // consensus seconds per slot (12 for Ethereum, 5 for Gnosis)
 }
 
 // NewClient creates a new Beacon Node client.
@@ -48,7 +50,8 @@ type Client struct {
 // rateLimit is requests per second (0 = unlimited).
 // rateBurst is the token bucket burst size.
 // backoff429 is the initial backoff duration for 429 (rate limit) errors.
-func NewClient(baseURL string, timeout time.Duration, slotWorkers int, rateLimit float64, rateBurst int, backoff429 time.Duration) *Client {
+// slotsPerEpoch and secondsPerSlot are the consensus-layer chain params (0 = use defaults: 32 and 12).
+func NewClient(baseURL string, timeout time.Duration, slotWorkers int, rateLimit float64, rateBurst int, backoff429 time.Duration, slotsPerEpoch, secondsPerSlot uint64) *Client {
 	if slotWorkers <= 0 {
 		slotWorkers = 8
 	}
@@ -58,6 +61,12 @@ func NewClient(baseURL string, timeout time.Duration, slotWorkers int, rateLimit
 	if backoff429 <= 0 {
 		backoff429 = 1 * time.Second
 	}
+	if slotsPerEpoch == 0 {
+		slotsPerEpoch = 32
+	}
+	if secondsPerSlot == 0 {
+		secondsPerSlot = 12
+	}
 
 	var limiter *rate.Limiter
 	if rateLimit > 0 {
@@ -65,11 +74,13 @@ func NewClient(baseURL string, timeout time.Duration, slotWorkers int, rateLimit
 	}
 
 	return &Client{
-		base:        strings.TrimRight(baseURL, "/"),
-		http:        &http.Client{Timeout: timeout},
-		slotWorkers: slotWorkers,
-		limiter:     limiter,
-		backoffBase: backoff429,
+		base:           strings.TrimRight(baseURL, "/"),
+		http:           &http.Client{Timeout: timeout},
+		slotWorkers:    slotWorkers,
+		limiter:        limiter,
+		backoffBase:    backoff429,
+		slotsPerEpoch:  slotsPerEpoch,
+		secondsPerSlot: secondsPerSlot,
 	}
 }
 
@@ -224,20 +235,17 @@ func (c *Client) GetNetworkName(ctx context.Context) (string, error) {
 }
 
 // SlotTime returns the timestamp of the given slot based on the genesis time.
-// Each slot is 12 seconds.
-func SlotTime(genesisTime time.Time, slot uint64) time.Time {
-	return genesisTime.Add(time.Duration(slot) * 12 * time.Second)
+func SlotTime(genesisTime time.Time, slot, secondsPerSlot uint64) time.Time {
+	return genesisTime.Add(time.Duration(slot) * time.Duration(secondsPerSlot) * time.Second)
 }
 
 // ─── Epoch helpers ────────────────────────────────────────────────────────────
 
-const slotsPerEpoch = 32
-
 // EpochToFirstSlot returns the first slot of the given epoch.
-func EpochToFirstSlot(epoch uint64) uint64 { return epoch * slotsPerEpoch }
+func EpochToFirstSlot(epoch, slotsPerEpoch uint64) uint64 { return epoch * slotsPerEpoch }
 
 // SlotToEpoch returns the epoch that contains the given slot.
-func SlotToEpoch(slot uint64) uint64 { return slot / slotsPerEpoch }
+func SlotToEpoch(slot, slotsPerEpoch uint64) uint64 { return slot / slotsPerEpoch }
 
 // FetchEpochInput fetches all blob sidecars for every slot in the given epoch
 // and assembles them into an EpochInput ready for the DAG builder.
@@ -247,7 +255,7 @@ func SlotToEpoch(slot uint64) uint64 { return slot / slotsPerEpoch }
 // txHash and blockNumber are fetched from the EL node via the provided
 // ELClient; pass nil to skip EL enrichment.
 func (c *Client) FetchEpochInput(ctx context.Context, epoch uint64, el ELClient) (types.EpochInput, error) {
-	firstSlot := EpochToFirstSlot(epoch)
+	firstSlot := EpochToFirstSlot(epoch, c.slotsPerEpoch)
 
 	inp := types.EpochInput{
 		Epoch: epoch,
@@ -256,12 +264,12 @@ func (c *Client) FetchEpochInput(ctx context.Context, epoch uint64, el ELClient)
 
 	// Pre-allocate one entry per slot; each goroutine writes to its own index
 	// so no mutex is needed.
-	slotBlobs := make([][]types.BlobInput, slotsPerEpoch)
+	slotBlobs := make([][]types.BlobInput, c.slotsPerEpoch)
 
 	g, gctx := errgroup.WithContext(ctx)
 	sem := make(chan struct{}, c.slotWorkers)
 
-	for i := 0; i < slotsPerEpoch; i++ {
+	for i := 0; i < int(c.slotsPerEpoch); i++ {
 		i := i
 		slot := firstSlot + uint64(i)
 		g.Go(func() error {

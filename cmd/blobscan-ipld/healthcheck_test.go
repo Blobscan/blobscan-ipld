@@ -128,7 +128,7 @@ func TestTier1MetaRecomputeDetectsCorruption(t *testing.T) {
 		SizeBytes:     ref.SizeBytes,
 	}}
 
-	epochInp, blobResults, err := generator.ReconstructFromDB(10, good)
+	epochInp, blobResults, err := generator.ReconstructFromDB(10, good, 32)
 	if err != nil {
 		t.Fatalf("ReconstructFromDB: %v", err)
 	}

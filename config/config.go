@@ -40,6 +40,8 @@ type NetworkConfig struct {
 	BeaconRateLimit  float64       // max requests per second to beacon RPC (optional; default 100)
 	BeaconRateBurst  int           // token bucket burst size (optional; default 10)
 	Beacon429Backoff time.Duration // initial backoff for 429 errors (optional; default 1s)
+	SlotsPerEpoch    uint64        // consensus slots per epoch (default 32; Gnosis = 16)
+	SecondsPerSlot   uint64        // consensus seconds per slot (default 12; Gnosis = 5)
 }
 
 // IPFSConfig holds connection settings for the IPFS node.
@@ -217,6 +219,17 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// networkChainParams returns the consensus-layer slot/epoch constants for
+// known networks. Falls back to Ethereum mainnet values for unknown networks.
+func networkChainParams(network string) (slotsPerEpoch, secondsPerSlot uint64) {
+	switch network {
+	case "gnosis":
+		return 16, 5
+	default:
+		return 32, 12
+	}
+}
+
 // dencunEpoch returns the first epoch that has blob sidecars for known networks.
 // Returns (0, false) for unknown networks.
 func dencunEpoch(network string) (uint64, bool) {
@@ -238,8 +251,11 @@ func (c *Config) applyDefaults() {
 	if c.Generator.HAMTThreshold == 0 {
 		c.Generator.HAMTThreshold = 5000
 	}
+	if c.Network.SlotsPerEpoch == 0 || c.Network.SecondsPerSlot == 0 {
+		c.Network.SlotsPerEpoch, c.Network.SecondsPerSlot = networkChainParams(c.Network.Name)
+	}
 	if c.Generator.PollInterval == 0 {
-		c.Generator.PollInterval = 12 * time.Second
+		c.Generator.PollInterval = time.Duration(c.Network.SecondsPerSlot) * time.Second
 	}
 	if c.Generator.Workers == 0 {
 		c.Generator.Workers = 16

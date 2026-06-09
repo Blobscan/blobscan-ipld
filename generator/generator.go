@@ -31,14 +31,16 @@ import (
 
 // Generator is the top-level DAG generation orchestrator.
 type Generator struct {
-	cfg         *config.Config
-	beacon      *beacon.Client // nil when beacon_rpc is not configured
-	ipfs        *ipfs.Client
-	db          *db.Client
-	state       state.Backend
-	notifier    *blobscan.Notifier // nil when blobscan.api_url is not configured
-	log         *slog.Logger
-	genesisTime time.Time // zero if not yet fetched or beacon unavailable
+	cfg            *config.Config
+	beacon         *beacon.Client // nil when beacon_rpc is not configured
+	ipfs           *ipfs.Client
+	db             *db.Client
+	state          state.Backend
+	notifier       *blobscan.Notifier // nil when blobscan.api_url is not configured
+	log            *slog.Logger
+	genesisTime    time.Time // zero if not yet fetched or beacon unavailable
+	slotsPerEpoch  uint64
+	secondsPerSlot uint64
 }
 
 // epochProgress carries batch-level progress state for ETA calculation.
@@ -65,6 +67,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 			cfg.Network.BeaconRateLimit,
 			cfg.Network.BeaconRateBurst,
 			cfg.Network.Beacon429Backoff,
+			cfg.Network.SlotsPerEpoch,
+			cfg.Network.SecondsPerSlot,
 		)
 	}
 
@@ -112,13 +116,15 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 	}
 
 	g := &Generator{
-		cfg:      cfg,
-		beacon:   beaconClient,
-		ipfs:     ipfsClient,
-		db:       dbClient,
-		state:    stateBackend,
-		notifier: notifier,
-		log:      log,
+		cfg:            cfg,
+		beacon:         beaconClient,
+		ipfs:           ipfsClient,
+		db:             dbClient,
+		state:          stateBackend,
+		notifier:       notifier,
+		log:            log,
+		slotsPerEpoch:  cfg.Network.SlotsPerEpoch,
+		secondsPerSlot: cfg.Network.SecondsPerSlot,
 	}
 
 	if beaconClient != nil {
@@ -726,7 +732,7 @@ func (g *Generator) persistEpoch(ctx context.Context, be builtEpoch) error {
 		} else {
 			lsys = store.NewLinkSystem(store.NullBlockstore{})
 		}
-		emptyInp := types.EpochInput{Epoch: be.epoch, Slot: be.epoch * 32}
+		emptyInp := types.EpochInput{Epoch: be.epoch, Slot: beacon.EpochToFirstSlot(be.epoch, g.slotsPerEpoch)}
 		epochResult, err := builder.BuildEpochNode(ctx, lsys, emptyInp, nil, g.cfg.Network.Name, g.cfg.Generator.HAMTThreshold)
 		if err != nil {
 			return fmt.Errorf("build empty epoch node %d: %w", be.epoch, err)
@@ -736,7 +742,7 @@ func (g *Generator) persistEpoch(ctx context.Context, be builtEpoch) error {
 				return err
 			}
 		}
-		epochTime := beacon.SlotTime(g.genesisTime, be.epoch*32)
+		epochTime := beacon.SlotTime(g.genesisTime, beacon.EpochToFirstSlot(be.epoch, g.slotsPerEpoch), g.secondsPerSlot)
 		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, 0, epochTime); err != nil {
 			return fmt.Errorf("save empty epoch %d to db: %w", be.epoch, err)
 		}
@@ -751,12 +757,12 @@ func (g *Generator) persistEpoch(ctx context.Context, be builtEpoch) error {
 
 	if g.db != nil {
 		g.log.Debug("saving to database", "epoch", be.epoch, "blobs", len(be.blobResults))
-		epochTime := beacon.SlotTime(g.genesisTime, be.epoch*32)
+		epochTime := beacon.SlotTime(g.genesisTime, beacon.EpochToFirstSlot(be.epoch, g.slotsPerEpoch), g.secondsPerSlot)
 		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, be.epochResult, len(be.blobResults), epochTime); err != nil {
 			return fmt.Errorf("save epoch %d to db: %w", be.epoch, err)
 		}
 		if !be.fromCache {
-			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, be.epoch, be.epochInp.Blobs, be.blobResults, g.genesisTime); err != nil {
+			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, be.epoch, be.epochInp.Blobs, be.blobResults, g.genesisTime, g.secondsPerSlot); err != nil {
 				return fmt.Errorf("save blobs epoch %d to db: %w", be.epoch, err)
 			}
 		}
@@ -789,7 +795,7 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 // avoiding a full beacon re-fetch. The raw blob Data is not loaded (not needed
 // for BuildEpochNode when BlobResult CIDs are already known).
 func (g *Generator) reconstructFromDB(epoch uint64, records []db.BlobRecord) (types.EpochInput, []types.BlobResult, error) {
-	return ReconstructFromDB(epoch, records)
+	return ReconstructFromDB(epoch, records, g.slotsPerEpoch)
 }
 
 // ReconstructFromDB maps DB blob rows for an epoch into the EpochInput and
@@ -802,8 +808,8 @@ func (g *Generator) reconstructFromDB(epoch uint64, records []db.BlobRecord) (ty
 // e.g. the health-check command — can reuse it without constructing a full
 // Generator. The reconstructed nodes match the DB rows, so comparing the result
 // against stored CIDs detects metadata corruption.
-func ReconstructFromDB(epoch uint64, records []db.BlobRecord) (types.EpochInput, []types.BlobResult, error) {
-	firstSlot := epoch * 32
+func ReconstructFromDB(epoch uint64, records []db.BlobRecord, slotsPerEpoch uint64) (types.EpochInput, []types.BlobResult, error) {
+	firstSlot := beacon.EpochToFirstSlot(epoch, slotsPerEpoch)
 	epochInp := types.EpochInput{
 		Epoch: epoch,
 		Slot:  firstSlot,
@@ -892,7 +898,7 @@ func (g *Generator) ProcessBlobInput(ctx context.Context, req api.BlobPushReques
 
 	// Persist blob record to DB (epoch row may not exist yet; SaveBlobs handles that).
 	if g.db != nil {
-		if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, req.Epoch, []types.BlobInput{inp}, []types.BlobResult{res}, g.genesisTime); err != nil {
+		if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, req.Epoch, []types.BlobInput{inp}, []types.BlobResult{res}, g.genesisTime, g.secondsPerSlot); err != nil {
 			return api.BlobPushResponse{}, fmt.Errorf("save blob to db: %w", err)
 		}
 	}
@@ -1009,7 +1015,7 @@ func (g *Generator) RepairEpochs(ctx context.Context, epochs []uint64, strict bo
 		// lose the durable repair we just computed and uploaded. The blob_count
 		// fix is the whole point of repair-epochs; never drop it to a cancel.
 		saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
+		epochTime := beacon.SlotTime(g.genesisTime, beacon.EpochToFirstSlot(epoch, g.slotsPerEpoch), g.secondsPerSlot)
 		err = g.db.SaveEpoch(saveCtx, g.cfg.Network.Name, epochResult, len(blobs), epochTime)
 		saveCancel()
 		if err != nil {
@@ -1065,7 +1071,7 @@ func (g *Generator) finalizeEpochInner(ctx context.Context, epoch uint64) (cid.C
 		return cid.Cid{}, err
 	}
 
-	epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
+	epochTime := beacon.SlotTime(g.genesisTime, beacon.EpochToFirstSlot(epoch, g.slotsPerEpoch), g.secondsPerSlot)
 	if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobs), epochTime); err != nil {
 		return cid.Cid{}, fmt.Errorf("save epoch %d to db: %w", epoch, err)
 	}
@@ -1417,13 +1423,13 @@ func (g *Generator) BackfillIPFS(ctx context.Context, fromEpoch, toEpoch uint64)
 		}
 
 		// Persist/update epoch row (idempotent ON CONFLICT DO UPDATE).
-		epochTime := beacon.SlotTime(g.genesisTime, epoch*32)
+		epochTime := beacon.SlotTime(g.genesisTime, beacon.EpochToFirstSlot(epoch, g.slotsPerEpoch), g.secondsPerSlot)
 		if err := g.db.SaveEpoch(ctx, g.cfg.Network.Name, epochResult, len(blobResults), epochTime); err != nil {
 			return fmt.Errorf("backfill-ipfs: save epoch %d: %w", epoch, err)
 		}
 		// Only update blob rows when CIDs differed (saves unnecessary DB writes on clean runs).
 		if cidMismatch {
-			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults, g.genesisTime); err != nil {
+			if err := g.db.SaveBlobs(ctx, g.cfg.Network.Name, epoch, epochInp.Blobs, blobResults, g.genesisTime, g.secondsPerSlot); err != nil {
 				return fmt.Errorf("backfill-ipfs: save blobs epoch %d: %w", epoch, err)
 			}
 		}
@@ -1455,8 +1461,8 @@ func (g *Generator) logFetchingEpoch(epoch uint64, p *epochProgress) {
 	}
 
 	if !g.genesisTime.IsZero() {
-		firstSlot := epoch * 32
-		blockTime := beacon.SlotTime(g.genesisTime, firstSlot)
+		firstSlot := beacon.EpochToFirstSlot(epoch, g.slotsPerEpoch)
+		blockTime := beacon.SlotTime(g.genesisTime, firstSlot, g.secondsPerSlot)
 		args = append(args, "block_time", blockTime.Format(time.RFC3339))
 	}
 
