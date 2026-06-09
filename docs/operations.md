@@ -868,14 +868,21 @@ local DB as a CSV file that can be directly imported into blobscan's
 | `-from N` | First epoch to export (default: 0) |
 | `-to N` | Last epoch to export (default: max epoch in DB) |
 | `-out PATH` | Output CSV file path (default: stdout) |
+| `-meta` | Include `meta_reference` column in output (default: off) |
 
 **Requirements:**
 - `POSTGRES_DSN` must be set.
 
 **CSV format:**
 
-The output CSV has a header row and four columns matching the blobscan
-`blob_data_storage_reference` table:
+By default the output CSV has three columns:
+
+```
+blob_hash,storage,data_reference
+0x01ab…,ipfs,bafyrei…
+```
+
+With `-meta`, a fourth column is added:
 
 ```
 blob_hash,storage,data_reference,meta_reference
@@ -884,22 +891,26 @@ blob_hash,storage,data_reference,meta_reference
 
 **Importing into blobscan:**
 
+After the export finishes, the command prints ready-to-use SQL import
+instructions to **stderr**. These include both a simple `\copy` and an
+upsert variant with `ON CONFLICT`. The instructions adapt automatically
+to the output file path and whether `-meta` was used.
+
+For reference, a simple import looks like:
+
 ```bash
-psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(blob_hash, storage, data_reference, meta_reference) FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true)"
+psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(blob_hash, storage, data_reference) FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true)"
 ```
 
-The import uses `\copy` which handles conflicts based on the table's composite
-primary key `(blob_hash, storage)`. If rows already exist, use an intermediate
-staging approach or add `ON CONFLICT DO NOTHING` via a temp table:
+And an upsert via a temp staging table:
 
 ```sql
 CREATE TEMP TABLE staging (LIKE blob_data_storage_reference INCLUDING ALL);
-\copy staging FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true);
-INSERT INTO blob_data_storage_reference
-SELECT * FROM staging
+\copy staging(blob_hash, storage, data_reference) FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true);
+INSERT INTO blob_data_storage_reference(blob_hash, storage, data_reference)
+SELECT blob_hash, storage, data_reference FROM staging
 ON CONFLICT (blob_hash, storage) DO UPDATE SET
-  data_reference = EXCLUDED.data_reference,
-  meta_reference = EXCLUDED.meta_reference;
+  data_reference = EXCLUDED.data_reference;
 ```
 
 ---

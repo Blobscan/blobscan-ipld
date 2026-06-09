@@ -843,6 +843,37 @@ func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger
 	}
 
 	log.Info("export-blob-refs complete", "rows", len(refs), "from", *fromEpoch, "to", *toEpoch)
+
+	// Print SQL import instructions to stderr.
+	csvFile := *outPath
+	if csvFile == "" {
+		csvFile = "<file.csv>"
+	}
+	cols := "blob_hash, storage, data_reference"
+	if *includeMeta {
+		cols = "blob_hash, storage, data_reference, meta_reference"
+	}
+	fmt.Fprintf(os.Stderr, `
+To import into blobscan, run:
+
+  psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(%s) FROM '%s' WITH (FORMAT csv, HEADER true)"
+
+To upsert (update existing rows):
+
+  psql "$BLOBSCAN_DATABASE_URL" <<'SQL'
+  CREATE TEMP TABLE staging (LIKE blob_data_storage_reference INCLUDING ALL);
+  \copy staging(%s) FROM '%s' WITH (FORMAT csv, HEADER true)
+  INSERT INTO blob_data_storage_reference(%s)
+  SELECT %s FROM staging
+  ON CONFLICT (blob_hash, storage) DO UPDATE SET
+    data_reference = EXCLUDED.data_reference`+func() string {
+		if *includeMeta {
+			return ",\n    meta_reference = EXCLUDED.meta_reference"
+		}
+		return ""
+	}()+`;
+  SQL
+`, cols, csvFile, cols, csvFile, cols, cols)
 }
 
 // summary: human-readable statistics about the indexed data.
