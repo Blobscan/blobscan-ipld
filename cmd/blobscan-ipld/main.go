@@ -76,7 +76,7 @@ Examples:
   blobscan-ipld export-blob-refs -from 300000 -to 300099
   blobscan-ipld export-blob-refs -meta -out /tmp/refs.csv
   blobscan-ipld summary
-  blobscan-ipld summary -gaps -empty -top 10 -monthly -check-ipfs -ipfs-stat
+  blobscan-ipld summary -gaps -empty -top 10 -monthly -check-ipfs
   blobscan-ipld repair-epochs
   blobscan-ipld repair-epochs -dry-run
   blobscan-ipld repair-epochs -no-verify
@@ -849,7 +849,6 @@ func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger
 func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 	fs := flag.NewFlagSet("summary", flag.ExitOnError)
 	checkIPFS := fs.Bool("check-ipfs", false, "verify epoch node CIDs are present on the IPFS node")
-	ipfsStat := fs.Bool("ipfs-stat", false, "query IPFS repo/stat (slow on large repos)")
 	showGaps := fs.Bool("gaps", false, "list all missing epoch ranges")
 	showEmpty := fs.Bool("empty", false, "list all genuinely empty epochs (no blobs on-chain)")
 	topN := fs.Int("top", 0, "show the top N epochs by blob count")
@@ -958,24 +957,20 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 			} else {
 				printRow("IPFS node", fmt.Sprintf("%s  (%s)", nodeInfo.ID, nodeInfo.AgentVersion))
 			}
-			if *ipfsStat {
-				rsCtx, rsCancel := context.WithTimeout(ctx, 5*time.Minute)
-				repoStat, rsErr := ipfsClient.GetRepoStat(rsCtx, true)
-				rsCancel()
-				if rsErr != nil {
-					printRow("IPFS storage", fmt.Sprintf("⚠ repo/stat: %v", rsErr))
-				} else {
-					usedPct := 0.0
-					if repoStat.StorageMax > 0 {
-						usedPct = float64(repoStat.RepoSize) / float64(repoStat.StorageMax) * 100
-					}
-					printRow("IPFS storage", fmt.Sprintf("%s / %s  (%.1f%% used)",
-						formatBytes(int64(repoStat.RepoSize)),
-						formatBytes(int64(repoStat.StorageMax)),
-						usedPct))
-				}
+			rsCtx, rsCancel := context.WithTimeout(ctx, 5*time.Minute)
+			repoStat, rsErr := ipfsClient.GetRepoStat(rsCtx, true)
+			rsCancel()
+			if rsErr != nil {
+				printRow("IPFS storage", fmt.Sprintf("⚠ repo/stat: %v", rsErr))
 			} else {
-				printRow("IPFS storage", "use -ipfs-stat to query (slow on large repos)")
+				usedPct := 0.0
+				if repoStat.StorageMax > 0 {
+					usedPct = float64(repoStat.RepoSize) / float64(repoStat.StorageMax) * 100
+				}
+				printRow("IPFS storage", fmt.Sprintf("%s / %s  (%.1f%% used)",
+					formatBytes(int64(repoStat.RepoSize)),
+					formatBytes(int64(repoStat.StorageMax)),
+					usedPct))
 			}
 
 			if *checkIPFS {
