@@ -709,6 +709,88 @@ overall IPFS upload completeness. Use `backfill-ipfs` to recover missing epochs.
 
 ---
 
+## Database health check (health-check)
+
+`health-check` analyzes the database for corruption — both the symptoms we have
+hit in production and a broader family of invariant violations — and tells you
+which command fixes each. It is **read-only** (no writes, no beacon, no IPFS for
+the default tiers) and safe to run anytime, including on a live system or from
+cron.
+
+```bash
+blobscan-ipld health-check            # tiers 0+1 (default)
+blobscan-ipld health-check -tier 0    # SQL invariants only (instant)
+blobscan-ipld health-check -tier 1 -samples 20
+```
+
+### What it checks, by tier
+
+**Tier 0 — SQL invariants (instant, pure aggregate queries):**
+
+| Check | Severity | Meaning |
+|-------|----------|---------|
+| `blob_count match` | FAIL | `ipld_epochs.blob_count` ≠ actual `ipld_blobs` row count (either direction). The original `blob_count=0` corruption is a special case. Fixed by `repair-epochs`. |
+| `size_bytes match` | WARN | `ipld_epochs.size_bytes` ≠ SUM of blob sizes. `size_bytes` is approximate, so this is informational. |
+| `network match` | FAIL | Blobs whose `network` differs from their epoch's `network` (possible because the epoch PK is global). |
+| `orphan blobs` | FAIL | Blobs with no matching `(epoch, network)` epoch row. |
+| `blob_index` | FAIL/WARN | Duplicate `blob_index` within an epoch (FAIL) or non-contiguous indices (WARN). |
+| `epoch gaps` | WARN | Missing epoch ranges (data not indexed yet, not corruption). |
+| `cursors` | WARN | Live/backfill cursor inversions vs. max epoch. |
+
+**Tier 1 — offline CID recompute (CPU-only, no network):**
+
+| Check | Severity | Meaning |
+|-------|----------|---------|
+| `meta_cid recompute` | FAIL | Recomputes each blob's `meta_cid` from its DB fields (`StoreBlobMetadata`) and compares to the stored value. This catches the **wrong-`meta_cid` corruption that `repair-epochs` cannot** (it trusts the DB). Fixed by `backfill-ipfs`. |
+| `epoch root recompute` | FAIL | Rebuilds each epoch root CID from DB rows (`BuildEpochNode`) and compares to `ipld_epochs.cid`. Root mismatches **not** explained by an underlying `meta_cid` mismatch are reported separately (pure root corruption). |
+
+Tier 1 cannot verify `data_cid` (the hash of the raw blob bytes, which aren't in
+the DB) — it only checks well-formedness. True `data_cid` verification requires
+re-fetching from the beacon, i.e. `backfill-ipfs`.
+
+### Output and exit codes
+
+Each check prints `PASS` / `WARN` / `FAIL` with a count and a few example
+epochs, followed by a **Suggested remediation** block with the exact commands to
+run. Skipped higher tiers are shown explicitly.
+
+```
+── blobscan-ipld summary ── mainnet health-check ──────────────────────────
+── Tier 0  SQL invariants ─────────────────────────────────────────────────
+  blob_count match FAIL   2 epochs (stored≠actual)  e.g. 453420 · 453424
+  size_bytes match PASS
+  network match    PASS
+  orphan blobs     PASS
+  blob_index       PASS
+  epoch gaps       WARN   1 range · 40 epochs missing
+  cursors          PASS
+── Tier 1  offline CID recompute ──────────────────────────────────────────
+  meta_cid recompute   FAIL   2 blobs wrong in 2 epochs  e.g. 453420 · 453424
+  epoch root recompute FAIL   2 epochs (all correlate with meta_cid)
+── Suggested remediation ──────────────────────────────────────────────────
+  blobscan-ipld repair-epochs        # fix 2 blob_count mismatches
+  blobscan-ipld backfill-ipfs -from 453420 -to 453420   # re-fetch & self-heal CIDs
+  blobscan-ipld backfill-ipfs -from 453424 -to 453424   # re-fetch & self-heal CIDs
+```
+
+Exit codes: **0** = no FAIL (WARN allowed, so cron can treat WARN as healthy),
+**2** = at least one FAIL, **1** = operational error (e.g. DB unreachable).
+
+### Recommended workflow
+
+1. `health-check` — see what's wrong and which remedy each issue needs.
+2. `repair-epochs` — fix `blob_count` mismatches (rebuild from DB rows).
+3. `backfill-ipfs -from X -to Y` — for epochs flagged by Tier 1 (wrong CIDs) or
+   missing data; it re-fetches real beacon data, recomputes CIDs, and self-heals
+   both the blob and epoch rows.
+4. `health-check` again — confirm everything is `PASS`.
+
+> `repair-epochs` only fixes `blob_count` and trusts the DB's stored CIDs, so it
+> cannot detect or repair wrong-CID corruption. That is exactly what Tier 1 of
+> `health-check` finds and what `backfill-ipfs` repairs.
+
+---
+
 ## Uploading historical epochs to IPFS (backfill-ipfs)
 
 If the indexer was previously run with `IPFS_SKIP_UPLOAD=true` (or without an

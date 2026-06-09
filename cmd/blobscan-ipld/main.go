@@ -50,6 +50,7 @@ Subcommands:
   export-blob-refs Export blob CID references as CSV for import into blobscan DB
   summary          Show indexed-data statistics (use -help for detail flags)
   repair-epochs    Rebuild epoch nodes from DB cache for epochs saved with blob_count=0 by mistake
+  health-check     Analyze DB integrity (blob_count/size/network/index invariants + offline CID recompute)
 
 Global flags (before subcommand):
   -log-level <level>  Log level: debug, info, warn, error (default: info)
@@ -77,6 +78,9 @@ Examples:
   blobscan-ipld repair-epochs
   blobscan-ipld repair-epochs -dry-run
   blobscan-ipld repair-epochs -no-verify
+  blobscan-ipld health-check
+  blobscan-ipld health-check -tier 0
+  blobscan-ipld health-check -tier 1 -samples 20
 `
 
 func main() {
@@ -163,6 +167,8 @@ func main() {
 		cmdSummary(ctx, cfg, subArgs)
 	case "repair-epochs":
 		cmdRepairEpochs(ctx, cfg, log, subArgs)
+	case "health-check", "check":
+		cmdHealthCheck(ctx, cfg, log, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s", subcommand, usage)
 		os.Exit(1)
@@ -1110,22 +1116,31 @@ func cmdRepairEpochs(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 	}
 	defer dbClient.Close()
 
-	epochs, err := dbClient.GetCorruptedEpochs(ctx, cfg.Network.Name)
+	// Detect any blob_count mismatch (stored ≠ actual row count) in either
+	// direction. blob_count is derived from the ipld_blobs rows, so rebuild-from-DB
+	// is the right authority for it. (Generalizes the old blob_count=0-only check;
+	// use `health-check` for metadata/CID corruption that this cannot detect.)
+	mismatches, err := dbClient.GetBlobCountMismatches(ctx, cfg.Network.Name)
 	if err != nil {
-		log.Error("failed to query corrupted epochs", "err", err)
+		log.Error("failed to query blob_count mismatches", "err", err)
 		os.Exit(1)
 	}
 
-	if len(epochs) == 0 {
-		log.Info("no corrupted epochs found")
+	if len(mismatches) == 0 {
+		log.Info("no blob_count mismatches found")
 		return
 	}
 
-	log.Info("corrupted epochs found", "count", len(epochs), "first", epochs[0], "last", epochs[len(epochs)-1])
+	epochs := make([]uint64, len(mismatches))
+	for i, m := range mismatches {
+		epochs[i] = m.Epoch
+	}
+
+	log.Info("blob_count mismatches found", "count", len(epochs), "first", epochs[0], "last", epochs[len(epochs)-1])
 
 	if *dryRun {
-		for _, e := range epochs {
-			fmt.Printf("%d\n", e)
+		for _, m := range mismatches {
+			fmt.Printf("%d\tstored=%d\tactual=%d\n", m.Epoch, m.Stored, m.Actual)
 		}
 		return
 	}
@@ -1145,9 +1160,469 @@ func cmdRepairEpochs(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 	})
 
 	log.Info("repair complete", "repaired", ok, "failed", failed)
+	// repair-epochs only fixes blob_count; it trusts the DB's meta/data CIDs.
+	// Point the operator at the deeper checks so wrong-CID corruption (which
+	// rebuild-from-DB cannot detect) doesn't go unnoticed.
+	log.Info("next: run `health-check` to verify CIDs; for epochs it flags, `backfill-ipfs` re-fetches and self-heals")
 	if failed > 0 {
 		os.Exit(1)
 	}
+}
+
+// ─── health-check ───────────────────────────────────────────────────────────
+
+// checkStatus is the outcome of a single health check.
+type checkStatus int
+
+const (
+	statusPass checkStatus = iota
+	statusWarn
+	statusFail
+	statusSkip
+)
+
+func (s checkStatus) String() string {
+	switch s {
+	case statusPass:
+		return "PASS"
+	case statusWarn:
+		return "WARN"
+	case statusFail:
+		return "FAIL"
+	default:
+		return "SKIP"
+	}
+}
+
+// checkResult is one row in the health report.
+type checkResult struct {
+	name    string
+	tier    int
+	status  checkStatus
+	detail  string   // human summary, e.g. "12 epochs"
+	samples []uint64 // example offending epochs (sorted, deduped)
+}
+
+// healthReport accumulates check results and tracks remediation hints.
+type healthReport struct {
+	results []checkResult
+	// epochs needing each remedy, for the remediation block.
+	repairEpochs   []uint64 // blob_count mismatches → repair-epochs
+	backfillEpochs []uint64 // CID corruption → backfill-ipfs
+}
+
+func (r *healthReport) add(name string, tier int, status checkStatus, detail string, samples []uint64) {
+	sortUint64(samples)
+	r.results = append(r.results, checkResult{name, tier, status, detail, samples})
+}
+
+// worstStatus returns the most severe status across all checks (skip < pass <
+// warn < fail), used for the exit code.
+func (r *healthReport) worst() checkStatus {
+	worst := statusPass
+	for _, c := range r.results {
+		if c.status > worst && c.status != statusSkip {
+			worst = c.status
+		}
+	}
+	return worst
+}
+
+func cmdHealthCheck(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
+	fs := flag.NewFlagSet("health-check", flag.ExitOnError)
+	maxTier := fs.Int("tier", 1, "highest tier to run (0=SQL invariants, 1=+offline CID recompute)")
+	samples := fs.Int("samples", 10, "number of example epochs to show per failing check")
+	_ = fs.Parse(args)
+
+	if cfg.Storage.PostgresDSN == "" {
+		fmt.Fprintln(os.Stderr, "health-check: postgres_dsn is required")
+		os.Exit(1)
+	}
+	if *maxTier < 0 {
+		*maxTier = 0
+	}
+
+	dbClient, err := db.New(ctx, cfg.Storage.PostgresDSN)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "health-check: connect to postgres: %v\n", err)
+		os.Exit(1)
+	}
+	defer dbClient.Close()
+
+	network := cfg.Network.Name
+	const width = 72
+	printSummaryHeader(network+" health-check", width)
+
+	rep := &healthReport{}
+
+	runTier0(ctx, dbClient, network, *samples, rep)
+	if *maxTier >= 1 {
+		runTier1(ctx, cfg, dbClient, network, *samples, rep)
+	}
+
+	// ── Render ────────────────────────────────────────────────────────────────
+	renderReport(rep, *maxTier, *samples, width)
+
+	// ── Remediation ───────────────────────────────────────────────────────────
+	renderRemediation(rep, width)
+
+	switch rep.worst() {
+	case statusFail:
+		os.Exit(2)
+	default:
+		// PASS or WARN → success exit.
+	}
+}
+
+// runTier0 executes the pure-SQL invariant checks.
+func runTier0(ctx context.Context, dbClient *db.Client, network string, samples int, rep *healthReport) {
+	// a) blob_count mismatch (FAIL) — repairable via repair-epochs.
+	if mm, err := dbClient.GetBlobCountMismatches(ctx, network); err != nil {
+		rep.add("blob_count match", 0, statusFail, "query error: "+err.Error(), nil)
+	} else if len(mm) == 0 {
+		rep.add("blob_count match", 0, statusPass, "", nil)
+	} else {
+		ex := make([]uint64, 0, len(mm))
+		for _, m := range mm {
+			ex = append(ex, m.Epoch)
+			rep.repairEpochs = append(rep.repairEpochs, m.Epoch)
+		}
+		rep.add("blob_count match", 0, statusFail,
+			fmt.Sprintf("%d epoch%s (stored≠actual)", len(mm), pluralS(int64(len(mm)))),
+			capSamples(ex, samples))
+	}
+
+	// b) size_bytes consistency (WARN — size is approximate).
+	if mm, err := dbClient.GetSizeMismatches(ctx, network); err != nil {
+		rep.add("size_bytes match", 0, statusFail, "query error: "+err.Error(), nil)
+	} else if len(mm) == 0 {
+		rep.add("size_bytes match", 0, statusPass, "", nil)
+	} else {
+		ex := make([]uint64, 0, len(mm))
+		for _, m := range mm {
+			ex = append(ex, m.Epoch)
+		}
+		rep.add("size_bytes match", 0, statusWarn,
+			fmt.Sprintf("%d epoch%s (approximate)", len(mm), pluralS(int64(len(mm)))),
+			capSamples(ex, samples))
+	}
+
+	// c) blob/epoch network mismatch (FAIL).
+	addAnomalyCheck(ctx, "network match", network, samples, rep, dbClient.GetNetworkMismatches, statusFail, "blobs on wrong network")
+
+	// d) orphan blobs (FAIL).
+	addAnomalyCheck(ctx, "orphan blobs", network, samples, rep, dbClient.GetOrphanBlobs, statusFail, "blobs without an epoch row")
+
+	// e) blob_index anomalies: duplicates FAIL, gaps WARN.
+	if an, err := dbClient.GetBlobIndexAnomalies(ctx, network); err != nil {
+		rep.add("blob_index", 0, statusFail, "query error: "+err.Error(), nil)
+	} else {
+		var dups, gaps []uint64
+		for _, a := range an {
+			if a.Rows != a.DistinctIdx {
+				dups = append(dups, a.Epoch)
+			} else {
+				gaps = append(gaps, a.Epoch) // contiguity broken but no dup
+			}
+		}
+		switch {
+		case len(dups) > 0:
+			rep.add("blob_index", 0, statusFail,
+				fmt.Sprintf("%d epoch%s with duplicate index", len(dups), pluralS(int64(len(dups)))),
+				capSamples(dups, samples))
+		case len(gaps) > 0:
+			rep.add("blob_index", 0, statusWarn,
+				fmt.Sprintf("%d epoch%s with index gaps", len(gaps), pluralS(int64(len(gaps)))),
+				capSamples(gaps, samples))
+		default:
+			rep.add("blob_index", 0, statusPass, "", nil)
+		}
+	}
+
+	// f) epoch gap ranges (WARN — missing data, not corrupt). Reuse stats.
+	stats, statsErr := dbClient.GetSummaryStats(ctx, network)
+	if statsErr != nil {
+		rep.add("epoch gaps", 0, statusFail, "query error: "+statsErr.Error(), nil)
+		rep.add("cursors", 0, statusFail, "query error: "+statsErr.Error(), nil)
+		return
+	}
+	if stats.GapCount == 0 {
+		rep.add("epoch gaps", 0, statusPass, "", nil)
+	} else {
+		gaps, err := dbClient.GetEpochGapRanges(ctx, network)
+		detail := fmt.Sprintf("%s epoch%s missing", formatCount(stats.GapCount), pluralS(stats.GapCount))
+		if err == nil {
+			detail = fmt.Sprintf("%d range%s · %s", len(gaps), pluralS(int64(len(gaps))), detail)
+		}
+		rep.add("epoch gaps", 0, statusWarn, detail, nil)
+	}
+
+	// g) cursor sanity: live <= max, backfill <= live (WARN on inversion).
+	var cursorIssues []string
+	if stats.LiveCursor > stats.LastEpoch {
+		cursorIssues = append(cursorIssues, fmt.Sprintf("live(%d) > max(%d)", stats.LiveCursor, stats.LastEpoch))
+	}
+	if stats.BackfillCursor > stats.LiveCursor && stats.BackfillCursor > stats.LastEpoch {
+		cursorIssues = append(cursorIssues, fmt.Sprintf("backfill(%d) > live(%d)", stats.BackfillCursor, stats.LiveCursor))
+	}
+	if len(cursorIssues) == 0 {
+		rep.add("cursors", 0, statusPass, "", nil)
+	} else {
+		rep.add("cursors", 0, statusWarn, strings.Join(cursorIssues, ", "), nil)
+	}
+}
+
+// addAnomalyCheck runs a per-epoch anomaly query and records a result.
+func addAnomalyCheck(ctx context.Context, name, network string, samples int, rep *healthReport,
+	query func(context.Context, string) ([]db.EpochAnomaly, error), failStatus checkStatus, what string) {
+	an, err := query(ctx, network)
+	if err != nil {
+		rep.add(name, 0, statusFail, "query error: "+err.Error(), nil)
+		return
+	}
+	if len(an) == 0 {
+		rep.add(name, 0, statusPass, "", nil)
+		return
+	}
+	ex := make([]uint64, 0, len(an))
+	var total int64
+	for _, a := range an {
+		ex = append(ex, a.Epoch)
+		total += a.Count
+	}
+	rep.add(name, 0, failStatus,
+		fmt.Sprintf("%s %s in %d epoch%s", formatCount(total), what, len(an), pluralS(int64(len(an)))),
+		capSamples(ex, samples))
+}
+
+// runTier1 recomputes meta_cid (per blob) and the epoch root CID (per epoch)
+// from DB rows alone and compares them to the stored values. No network I/O.
+func runTier1(ctx context.Context, cfg *config.Config, dbClient *db.Client, network string, samples int, rep *healthReport) {
+	epochs, err := dbClient.GetAllEpochs(ctx, network)
+	if err != nil {
+		rep.add("meta_cid recompute", 1, statusFail, "query error: "+err.Error(), nil)
+		rep.add("epoch root recompute", 1, statusFail, "query error: "+err.Error(), nil)
+		return
+	}
+
+	var (
+		metaBad []uint64 // epochs with ≥1 wrong meta_cid (or unparseable data_cid)
+		rootBad []uint64 // epochs whose root CID disagrees
+		blobBad int64    // total blobs with wrong meta_cid
+	)
+
+	for i, e := range epochs {
+		if ctx.Err() != nil {
+			break
+		}
+		if len(epochs) > 50 && (i%100 == 0 || i == len(epochs)-1) {
+			fmt.Fprintf(os.Stderr, "\r  tier 1: recomputing %d/%d epochs", i+1, len(epochs))
+		}
+
+		records, err := dbClient.GetBlobsByEpoch(ctx, network, e.Epoch)
+		if err != nil || len(records) == 0 {
+			continue // empty/uncheckable epochs aren't a Tier-1 concern
+		}
+
+		epochInp, blobResults, err := generator.ReconstructFromDB(e.Epoch, records)
+		if err != nil {
+			// Unparseable data_cid/meta_cid in a row → structural corruption.
+			metaBad = append(metaBad, e.Epoch)
+			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
+			continue
+		}
+
+		// Per-blob meta_cid recompute.
+		epochMetaBad := false
+		for j, r := range records {
+			bs := store.NewMemBlockstore()
+			lsys := store.NewLinkSystem(bs)
+			metaCID, err := builder.StoreBlobMetadata(ctx, lsys, epochInp.Blobs[j], blobResults[j].DataCID)
+			if err != nil {
+				epochMetaBad = true
+				continue
+			}
+			if metaCID.String() != r.MetaCID {
+				epochMetaBad = true
+				blobBad++
+			}
+		}
+		if epochMetaBad {
+			metaBad = append(metaBad, e.Epoch)
+			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
+		}
+
+		// Epoch root recompute.
+		bs := store.NewMemBlockstore()
+		lsys := store.NewLinkSystem(bs)
+		res, err := builder.BuildEpochNode(ctx, lsys, epochInp, blobResults, network, cfg.Generator.HAMTThreshold)
+		if err != nil {
+			rootBad = append(rootBad, e.Epoch)
+			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
+			continue
+		}
+		if res.CID.String() != e.CID {
+			rootBad = append(rootBad, e.Epoch)
+			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
+		}
+	}
+	if len(epochs) > 50 {
+		fmt.Fprint(os.Stderr, "\r\033[K") // clear progress line
+	}
+
+	if len(metaBad) == 0 {
+		rep.add("meta_cid recompute", 1, statusPass, "", nil)
+	} else {
+		rep.add("meta_cid recompute", 1, statusFail,
+			fmt.Sprintf("%d blob%s wrong in %d epoch%s",
+				blobBad, pluralS(blobBad), len(metaBad), pluralS(int64(len(metaBad)))),
+			capSamples(metaBad, samples))
+	}
+
+	// Report root mismatches that have NO underlying meta mismatch separately:
+	// those are pure root corruption rather than a downstream effect.
+	metaSet := make(map[uint64]struct{}, len(metaBad))
+	for _, e := range metaBad {
+		metaSet[e] = struct{}{}
+	}
+	var pureRoot []uint64
+	for _, e := range rootBad {
+		if _, ok := metaSet[e]; !ok {
+			pureRoot = append(pureRoot, e)
+		}
+	}
+	switch {
+	case len(rootBad) == 0:
+		rep.add("epoch root recompute", 1, statusPass, "", nil)
+	case len(pureRoot) > 0:
+		rep.add("epoch root recompute", 1, statusFail,
+			fmt.Sprintf("%d epoch%s (%d not explained by meta_cid)",
+				len(rootBad), pluralS(int64(len(rootBad))), len(pureRoot)),
+			capSamples(pureRoot, samples))
+	default:
+		rep.add("epoch root recompute", 1, statusFail,
+			fmt.Sprintf("%d epoch%s (all correlate with meta_cid)", len(rootBad), pluralS(int64(len(rootBad)))),
+			capSamples(rootBad, samples))
+	}
+}
+
+// renderReport prints the per-tier check table.
+func renderReport(rep *healthReport, maxTier, samples, width int) {
+	for tier := 0; tier <= 1; tier++ {
+		var rows []checkResult
+		for _, c := range rep.results {
+			if c.tier == tier {
+				rows = append(rows, c)
+			}
+		}
+		title := fmt.Sprintf("Tier %d", tier)
+		if tier == 0 {
+			title += "  SQL invariants"
+		} else {
+			title += "  offline CID recompute"
+		}
+		if tier > maxTier {
+			printSectionHeader(title, "skipped — raise -tier", width)
+			continue
+		}
+		printSectionHeader(title, "", width)
+		for _, c := range rows {
+			line := fmt.Sprintf("%-6s %s", c.status, c.detail)
+			if len(c.samples) > 0 {
+				line += "  e.g. " + formatEpochSamples(c.samples, samples)
+			}
+			printRow(c.name, strings.TrimRight(line, " "))
+		}
+	}
+}
+
+// renderRemediation prints suggested follow-up commands.
+func renderRemediation(rep *healthReport, width int) {
+	repair := dedupUint64(rep.repairEpochs)
+	backfill := dedupUint64(rep.backfillEpochs)
+	if len(repair) == 0 && len(backfill) == 0 {
+		return
+	}
+	printSectionHeader("Suggested remediation", "", width)
+	if len(repair) > 0 {
+		fmt.Printf("  blobscan-ipld repair-epochs        # fix %d blob_count mismatch%s\n",
+			len(repair), map[bool]string{true: "es", false: ""}[len(repair) != 1])
+	}
+	for _, rng := range collapseRanges(backfill) {
+		if rng[0] == rng[1] {
+			fmt.Printf("  blobscan-ipld backfill-ipfs -from %d -to %d   # re-fetch & self-heal CIDs\n", rng[0], rng[1])
+		} else {
+			fmt.Printf("  blobscan-ipld backfill-ipfs -from %d -to %d   # re-fetch & self-heal %d epochs\n",
+				rng[0], rng[1], rng[1]-rng[0]+1)
+		}
+	}
+}
+
+// ── health-check helpers ────────────────────────────────────────────────────
+
+// capSamples returns at most n epochs (already the caller's offending list).
+func capSamples(epochs []uint64, n int) []uint64 {
+	if len(epochs) <= n {
+		return epochs
+	}
+	return epochs[:n]
+}
+
+// formatEpochSamples renders sample epochs as "a · b · c … +N".
+func formatEpochSamples(epochs []uint64, max int) string {
+	shown := epochs
+	extra := 0
+	if len(epochs) > max {
+		shown = epochs[:max]
+		extra = len(epochs) - max
+	}
+	parts := make([]string, len(shown))
+	for i, e := range shown {
+		parts[i] = fmt.Sprintf("%d", e)
+	}
+	s := strings.Join(parts, " · ")
+	if extra > 0 {
+		s += fmt.Sprintf(" … +%d", extra)
+	}
+	return s
+}
+
+func dedupUint64(in []uint64) []uint64 {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, len(in))
+	out := make([]uint64, 0, len(in))
+	for _, v := range in {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sortUint64(out)
+	return out
+}
+
+// collapseRanges turns a sorted, deduped epoch list into contiguous [start,end]
+// ranges.
+func collapseRanges(epochs []uint64) [][2]uint64 {
+	epochs = dedupUint64(epochs)
+	if len(epochs) == 0 {
+		return nil
+	}
+	var out [][2]uint64
+	start, end := epochs[0], epochs[0]
+	for _, e := range epochs[1:] {
+		if e == end+1 {
+			end = e
+		} else {
+			out = append(out, [2]uint64{start, end})
+			start, end = e, e
+		}
+	}
+	out = append(out, [2]uint64{start, end})
+	return out
 }
 
 // Fast path: fetch the node's recursive pin set in a single pin/ls request and
@@ -1381,7 +1856,6 @@ func (h *teeHandler) WithGroup(name string) slog.Handler {
 func newIPFSClientFromConfig(cfg *config.Config) (*ipfs.Client, error) {
 	return ipfs.NewClient(cfg.IPFS.APIAddr, cfg.IPFS.Timeout, cfg.IPFS.PinOnAdd, cfg.IPFS.UploadWorkers)
 }
-
 
 func newLogger(level string) *slog.Logger {
 	var lvl slog.Level

@@ -420,7 +420,7 @@ type SummaryStats struct {
 	TotalSizeBytes     int64
 	AvgBlobsPerEpoch   float64
 	MaxBlobsPerEpoch   int64
-	MaxBlobsEpoch      uint64  // epoch with the most blobs
+	MaxBlobsEpoch      uint64 // epoch with the most blobs
 	FirstEpochTime     *time.Time
 	LastEpochTime      *time.Time
 	LiveCursor         uint64
@@ -691,31 +691,183 @@ func (c *Client) GetEmptyEpochs(ctx context.Context, network string) ([]uint64, 
 	return out, rows.Err()
 }
 
-// GetCorruptedEpochs returns epochs whose ipld_epochs row has blob_count=0
-// but whose ipld_blobs rows have actual blobs — i.e. epochs that were
-// incorrectly saved as empty and need to be rebuilt from the DB cache.
-func (c *Client) GetCorruptedEpochs(ctx context.Context, network string) ([]uint64, error) {
+// ─── Health-check queries ───────────────────────────────────────────────────
+//
+// These return offending rows for the health-check command. Each is a single
+// aggregate query filtered by network; callers report counts + a few samples.
+
+// EpochCountMismatch is an epoch whose stored blob_count disagrees with the
+// actual number of ipld_blobs rows for that epoch.
+type EpochCountMismatch struct {
+	Epoch  uint64
+	Stored int64 // ipld_epochs.blob_count
+	Actual int64 // COUNT(ipld_blobs)
+}
+
+// EpochSizeMismatch is an epoch whose stored size_bytes disagrees with the sum
+// of its blobs' sizes. Treated as a warning (size is "approximate").
+type EpochSizeMismatch struct {
+	Epoch  uint64
+	Stored int64 // ipld_epochs.size_bytes
+	Actual int64 // SUM(ipld_blobs.size_bytes)
+}
+
+// EpochAnomaly is a generic per-epoch count of offending blob rows.
+type EpochAnomaly struct {
+	Epoch uint64
+	Count int64
+}
+
+// BlobIndexAnomaly describes blob_index irregularities within an epoch:
+// duplicate indices (Rows != DistinctIdx) or non-contiguous indices
+// (MaxIdx+1 != DistinctIdx for the expected 0-based dense layout).
+type BlobIndexAnomaly struct {
+	Epoch       uint64
+	Rows        int64
+	DistinctIdx int64
+	MaxIdx      int64
+}
+
+// GetBlobCountMismatches returns epochs whose stored blob_count differs from the
+// actual ipld_blobs row count in either direction (e.g. the blob_count=0
+// corruption, but also any over- or under-count).
+func (c *Client) GetBlobCountMismatches(ctx context.Context, network string) ([]EpochCountMismatch, error) {
 	rows, err := c.pool.Query(ctx,
-		`SELECT e.epoch
+		`SELECT e.epoch, e.blob_count, COUNT(b.commitment)
 		 FROM ipld_epochs e
-		 JOIN ipld_blobs b ON b.epoch = e.epoch AND b.network = e.network
-		 WHERE e.network = $1 AND e.blob_count = 0
-		 GROUP BY e.epoch
-		 HAVING COUNT(b.commitment) > 0
+		 LEFT JOIN ipld_blobs b ON b.epoch = e.epoch AND b.network = e.network
+		 WHERE e.network = $1
+		 GROUP BY e.epoch, e.blob_count
+		 HAVING e.blob_count <> COUNT(b.commitment)
 		 ORDER BY e.epoch`,
 		network,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("db: get corrupted epochs: %w", err)
+		return nil, fmt.Errorf("db: get blob_count mismatches: %w", err)
 	}
 	defer rows.Close()
-	var out []uint64
+	var out []EpochCountMismatch
 	for rows.Next() {
-		var epoch uint64
-		if err := rows.Scan(&epoch); err != nil {
-			return nil, fmt.Errorf("db: scan corrupted epoch: %w", err)
+		var m EpochCountMismatch
+		if err := rows.Scan(&m.Epoch, &m.Stored, &m.Actual); err != nil {
+			return nil, fmt.Errorf("db: scan blob_count mismatch: %w", err)
 		}
-		out = append(out, epoch)
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// GetSizeMismatches returns epochs whose stored size_bytes differs from the sum
+// of their blobs' size_bytes.
+func (c *Client) GetSizeMismatches(ctx context.Context, network string) ([]EpochSizeMismatch, error) {
+	rows, err := c.pool.Query(ctx,
+		`SELECT e.epoch, e.size_bytes, COALESCE(SUM(b.size_bytes), 0)
+		 FROM ipld_epochs e
+		 LEFT JOIN ipld_blobs b ON b.epoch = e.epoch AND b.network = e.network
+		 WHERE e.network = $1
+		 GROUP BY e.epoch, e.size_bytes
+		 HAVING e.size_bytes <> COALESCE(SUM(b.size_bytes), 0)
+		 ORDER BY e.epoch`,
+		network,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("db: get size mismatches: %w", err)
+	}
+	defer rows.Close()
+	var out []EpochSizeMismatch
+	for rows.Next() {
+		var m EpochSizeMismatch
+		if err := rows.Scan(&m.Epoch, &m.Stored, &m.Actual); err != nil {
+			return nil, fmt.Errorf("db: scan size mismatch: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// GetNetworkMismatches returns epochs that have blob rows whose network column
+// disagrees with the epoch's network. Because ipld_epochs.epoch is the PK alone
+// (globally unique), the FK can be satisfied by an epoch row of another network;
+// this catches that.
+func (c *Client) GetNetworkMismatches(ctx context.Context, network string) ([]EpochAnomaly, error) {
+	rows, err := c.pool.Query(ctx,
+		`SELECT b.epoch, COUNT(*)
+		 FROM ipld_blobs b
+		 JOIN ipld_epochs e ON e.epoch = b.epoch
+		 WHERE e.network = $1 AND b.network <> e.network
+		 GROUP BY b.epoch
+		 ORDER BY b.epoch`,
+		network,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("db: get network mismatches: %w", err)
+	}
+	defer rows.Close()
+	return scanEpochAnomalies(rows, "network mismatch")
+}
+
+// GetOrphanBlobs returns epochs whose blobs reference no matching
+// (epoch, network) row in ipld_epochs.
+func (c *Client) GetOrphanBlobs(ctx context.Context, network string) ([]EpochAnomaly, error) {
+	rows, err := c.pool.Query(ctx,
+		`SELECT b.epoch, COUNT(*)
+		 FROM ipld_blobs b
+		 WHERE b.network = $1
+		   AND NOT EXISTS (
+		       SELECT 1 FROM ipld_epochs e
+		       WHERE e.epoch = b.epoch AND e.network = b.network
+		   )
+		 GROUP BY b.epoch
+		 ORDER BY b.epoch`,
+		network,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("db: get orphan blobs: %w", err)
+	}
+	defer rows.Close()
+	return scanEpochAnomalies(rows, "orphan blobs")
+}
+
+func scanEpochAnomalies(rows pgx.Rows, what string) ([]EpochAnomaly, error) {
+	var out []EpochAnomaly
+	for rows.Next() {
+		var a EpochAnomaly
+		if err := rows.Scan(&a.Epoch, &a.Count); err != nil {
+			return nil, fmt.Errorf("db: scan %s: %w", what, err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// GetBlobIndexAnomalies returns epochs whose blob_index values are not a clean
+// 0-based dense set: either duplicated (Rows != DistinctIdx) or with gaps
+// (MaxIdx+1 != DistinctIdx). Callers classify duplicates as FAIL, gaps as WARN.
+func (c *Client) GetBlobIndexAnomalies(ctx context.Context, network string) ([]BlobIndexAnomaly, error) {
+	rows, err := c.pool.Query(ctx,
+		`SELECT epoch,
+		        COUNT(*)                   AS rows,
+		        COUNT(DISTINCT blob_index) AS distinct_idx,
+		        MAX(blob_index)            AS max_idx
+		 FROM ipld_blobs
+		 WHERE network = $1
+		 GROUP BY epoch
+		 HAVING COUNT(*) <> COUNT(DISTINCT blob_index)
+		     OR MAX(blob_index) + 1 <> COUNT(DISTINCT blob_index)
+		 ORDER BY epoch`,
+		network,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("db: get blob_index anomalies: %w", err)
+	}
+	defer rows.Close()
+	var out []BlobIndexAnomaly
+	for rows.Next() {
+		var a BlobIndexAnomaly
+		if err := rows.Scan(&a.Epoch, &a.Rows, &a.DistinctIdx, &a.MaxIdx); err != nil {
+			return nil, fmt.Errorf("db: scan blob_index anomaly: %w", err)
+		}
+		out = append(out, a)
 	}
 	return out, rows.Err()
 }

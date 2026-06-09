@@ -789,6 +789,20 @@ func (g *Generator) processEpoch(ctx context.Context, epoch uint64, p *epochProg
 // avoiding a full beacon re-fetch. The raw blob Data is not loaded (not needed
 // for BuildEpochNode when BlobResult CIDs are already known).
 func (g *Generator) reconstructFromDB(epoch uint64, records []db.BlobRecord) (types.EpochInput, []types.BlobResult, error) {
+	return ReconstructFromDB(epoch, records)
+}
+
+// ReconstructFromDB maps DB blob rows for an epoch into the EpochInput and
+// []BlobResult that builder.BuildEpochNode / StoreBlobMetadata consume, without
+// re-fetching from the beacon. The raw blob Data is intentionally not loaded:
+// Size carries the byte length so MetaCID stays identical, and the precomputed
+// Data/Meta CIDs come straight from the rows.
+//
+// It is a pure function (no generator/beacon/IPFS state) so read-only callers —
+// e.g. the health-check command — can reuse it without constructing a full
+// Generator. The reconstructed nodes match the DB rows, so comparing the result
+// against stored CIDs detects metadata corruption.
+func ReconstructFromDB(epoch uint64, records []db.BlobRecord) (types.EpochInput, []types.BlobResult, error) {
 	firstSlot := epoch * 32
 	epochInp := types.EpochInput{
 		Epoch: epoch,
