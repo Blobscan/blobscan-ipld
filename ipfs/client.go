@@ -554,13 +554,16 @@ type RepoStat struct {
 }
 
 // GetRepoStat queries the IPFS node for its repository storage statistics.
+// repo/stat must walk the entire datastore and can take several minutes on
+// large repos, so it uses pinHTTP (no hard client timeout) and is bounded
+// only by the caller's context.
 func (c *Client) GetRepoStat(ctx context.Context) (RepoStat, error) {
 	endpoint := fmt.Sprintf("%s/api/v0/repo/stat", c.base)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return RepoStat{}, fmt.Errorf("ipfs: build repo/stat request: %w", err)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.pinHTTP.Do(req)
 	if err != nil {
 		return RepoStat{}, fmt.Errorf("ipfs: repo/stat request: %w", err)
 	}
