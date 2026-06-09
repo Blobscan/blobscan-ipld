@@ -27,6 +27,8 @@ import (
 	"github.com/blobscan/blobscan-ipld/types"
 
 	"flag"
+	"runtime"
+	"sync/atomic"
 
 	sentry "github.com/getsentry/sentry-go"
 	sentryslog "github.com/getsentry/sentry-go/slog"
@@ -1427,69 +1429,118 @@ func runTier1(ctx context.Context, cfg *config.Config, dbClient *db.Client, netw
 		return
 	}
 
-	var (
-		metaBad []uint64 // epochs with ≥1 wrong meta_cid (or unparseable data_cid)
-		rootBad []uint64 // epochs whose root CID disagrees
-		blobBad int64    // total blobs with wrong meta_cid
-	)
+	type epochResult struct {
+		epoch    uint64
+		metaBad  bool
+		rootBad  bool
+		blobsBad int64
+	}
 
+	total := len(epochs)
+	var done atomic.Int64
+
+	results := make([]epochResult, total)
+	workers := runtime.NumCPU()
+	if workers > 16 {
+		workers = 16
+	}
+
+	type job struct {
+		idx int
+		e   db.EpochRecord
+	}
+	jobCh := make(chan job, workers*2)
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobCh {
+				r := epochResult{epoch: j.e.Epoch}
+
+				records, err := dbClient.GetBlobsByEpoch(ctx, network, j.e.Epoch)
+				if err != nil || len(records) == 0 {
+					done.Add(1)
+					results[j.idx] = r
+					continue
+				}
+
+				epochInp, blobResults, err := generator.ReconstructFromDB(j.e.Epoch, records)
+				if err != nil {
+					r.metaBad = true
+					done.Add(1)
+					results[j.idx] = r
+					continue
+				}
+
+				for k, rec := range records {
+					bs := store.NewMemBlockstore()
+					lsys := store.NewLinkSystem(bs)
+					metaCID, err := builder.StoreBlobMetadata(ctx, lsys, epochInp.Blobs[k], blobResults[k].DataCID)
+					if err != nil {
+						r.metaBad = true
+						continue
+					}
+					if metaCID.String() != rec.MetaCID {
+						r.metaBad = true
+						r.blobsBad++
+					}
+				}
+
+				bs := store.NewMemBlockstore()
+				lsys := store.NewLinkSystem(bs)
+				res, err := builder.BuildEpochNode(ctx, lsys, epochInp, blobResults, network, cfg.Generator.HAMTThreshold)
+				if err != nil {
+					r.rootBad = true
+				} else if res.CID.String() != j.e.CID {
+					r.rootBad = true
+				}
+
+				done.Add(1)
+				results[j.idx] = r
+			}
+		}()
+	}
+
+	// Feed jobs and print progress from the main goroutine.
+	showProgress := total > 50
 	for i, e := range epochs {
 		if ctx.Err() != nil {
 			break
 		}
-		if len(epochs) > 50 && (i%100 == 0 || i == len(epochs)-1) {
-			fmt.Fprintf(os.Stderr, "\r  tier 1: recomputing %d/%d epochs", i+1, len(epochs))
+		if showProgress && i%50 == 0 {
+			n := done.Load()
+			pct := int(n * 100 / int64(total))
+			fmt.Fprintf(os.Stderr, "\r  tier 1: recomputing %d/%d epochs (%d%%)", n, total, pct)
 		}
-
-		records, err := dbClient.GetBlobsByEpoch(ctx, network, e.Epoch)
-		if err != nil || len(records) == 0 {
-			continue // empty/uncheckable epochs aren't a Tier-1 concern
-		}
-
-		epochInp, blobResults, err := generator.ReconstructFromDB(e.Epoch, records)
-		if err != nil {
-			// Unparseable data_cid/meta_cid in a row → structural corruption.
-			metaBad = append(metaBad, e.Epoch)
-			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
-			continue
-		}
-
-		// Per-blob meta_cid recompute.
-		epochMetaBad := false
-		for j, r := range records {
-			bs := store.NewMemBlockstore()
-			lsys := store.NewLinkSystem(bs)
-			metaCID, err := builder.StoreBlobMetadata(ctx, lsys, epochInp.Blobs[j], blobResults[j].DataCID)
-			if err != nil {
-				epochMetaBad = true
-				continue
-			}
-			if metaCID.String() != r.MetaCID {
-				epochMetaBad = true
-				blobBad++
-			}
-		}
-		if epochMetaBad {
-			metaBad = append(metaBad, e.Epoch)
-			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
-		}
-
-		// Epoch root recompute.
-		bs := store.NewMemBlockstore()
-		lsys := store.NewLinkSystem(bs)
-		res, err := builder.BuildEpochNode(ctx, lsys, epochInp, blobResults, network, cfg.Generator.HAMTThreshold)
-		if err != nil {
-			rootBad = append(rootBad, e.Epoch)
-			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
-			continue
-		}
-		if res.CID.String() != e.CID {
-			rootBad = append(rootBad, e.Epoch)
-			rep.backfillEpochs = append(rep.backfillEpochs, e.Epoch)
-		}
+		jobCh <- job{i, e}
 	}
-	if len(epochs) > 50 {
+	close(jobCh)
+	wg.Wait()
+
+	if showProgress {
+		fmt.Fprintf(os.Stderr, "\r  tier 1: recomputing %d/%d epochs (100%%)", total, total)
 		fmt.Fprint(os.Stderr, "\r\033[K") // clear progress line
+	}
+
+	var (
+		metaBad []uint64
+		rootBad []uint64
+		blobBad int64
+	)
+	for _, r := range results {
+		if r.metaBad {
+			metaBad = append(metaBad, r.epoch)
+			rep.backfillEpochs = append(rep.backfillEpochs, r.epoch)
+			blobBad += r.blobsBad
+		}
+		if r.rootBad {
+			rootBad = append(rootBad, r.epoch)
+			if !r.metaBad {
+				rep.backfillEpochs = append(rep.backfillEpochs, r.epoch)
+			}
+		}
 	}
 
 	if len(metaBad) == 0 {
