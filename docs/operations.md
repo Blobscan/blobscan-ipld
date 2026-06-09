@@ -1076,6 +1076,16 @@ What protects against it (current code):
   missing it logs `skipping pin: epoch DAG not fully present locally` naming the
   CID and moves on, instead of hanging. Both verify and pin are bounded by a 30s
   context timeout.
+- **`repair-epochs` integrity guard (strict by default):** because repair
+  rebuilds from DB metadata without re-fetching blob data, it cannot tell when
+  that metadata is itself wrong — it would compute and persist a *wrong* epoch
+  root (observed on epochs whose stored `meta_cid`/`size_bytes` was corrupt).
+  After uploading, repair now runs `VerifyLocal` on the rebuilt root and, if any
+  block is unresolved, **fails the epoch instead of saving a bad root**, with:
+  `integrity check failed (DB metadata likely wrong or blob data missing) — run
+  backfill-ipfs ...`. Pass `-no-verify` to restore the old trust-the-DB
+  behavior. The proper fix for a flagged epoch is `backfill-ipfs`, which
+  re-fetches real beacon data, recomputes CIDs, and self-heals the DB rows.
 - `SaveEpoch` in the repair loop runs on a context detached from cancellation
   (`context.WithoutCancel`), so a Ctrl+C during the best-effort pin can no
   longer poison the durable `blob_count` fix (previously this surfaced as

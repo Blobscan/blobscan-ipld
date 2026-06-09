@@ -76,6 +76,7 @@ Examples:
   blobscan-ipld summary -gaps -empty -top 10 -monthly -check-ipfs
   blobscan-ipld repair-epochs
   blobscan-ipld repair-epochs -dry-run
+  blobscan-ipld repair-epochs -no-verify
 `
 
 func main() {
@@ -1094,6 +1095,7 @@ func cmdSummary(ctx context.Context, cfg *config.Config, args []string) {
 func cmdRepairEpochs(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
 	fs := flag.NewFlagSet("repair-epochs", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "print corrupted epochs without repairing them")
+	noVerify := fs.Bool("no-verify", false, "skip the local-DAG integrity check before saving (trust DB metadata blindly)")
 	fs.Parse(args)
 
 	if cfg.Storage.PostgresDSN == "" {
@@ -1134,7 +1136,7 @@ func cmdRepairEpochs(ctx context.Context, cfg *config.Config, log *slog.Logger, 
 		os.Exit(1)
 	}
 
-	ok, failed := gen.RepairEpochs(ctx, epochs, func(epoch uint64, err error) {
+	ok, failed := gen.RepairEpochs(ctx, epochs, !*noVerify, func(epoch uint64, err error) {
 		if err != nil {
 			log.Error("failed to repair epoch", "epoch", epoch, "err", err)
 		} else {

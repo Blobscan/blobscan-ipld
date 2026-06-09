@@ -925,7 +925,15 @@ func (g *Generator) FinalizeEpoch(ctx context.Context, epoch uint64) error {
 // RepairEpochs rebuilds epoch nodes from the DB cache for all epochs that have
 // blob_count=0 in ipld_epochs but real rows in ipld_blobs. It uploads to IPFS
 // once per epoch but defers the expensive network root rebuild to the end.
-func (g *Generator) RepairEpochs(ctx context.Context, epochs []uint64, onDone func(epoch uint64, err error)) (int, int) {
+//
+// repair rebuilds from DB metadata *without* re-fetching blob data, so it cannot
+// detect when that metadata is itself wrong — it would faithfully compute and
+// persist a wrong epoch root. When strict is true, after uploading we verify the
+// whole DAG resolves locally (VerifyLocal); if a referenced block is absent the
+// epoch is failed rather than saved, with a message pointing at backfill-ipfs
+// (which re-fetches real data and self-heals the DB). Pass strict=false to keep
+// the old trust-the-DB behavior.
+func (g *Generator) RepairEpochs(ctx context.Context, epochs []uint64, strict bool, onDone func(epoch uint64, err error)) (int, int) {
 	ok, failed := 0, 0
 	for i, epoch := range epochs {
 		if ctx.Err() != nil {
@@ -967,6 +975,20 @@ func (g *Generator) RepairEpochs(ctx context.Context, epochs []uint64, onDone fu
 			onDone(epoch, fmt.Errorf("ipfs upload: %w", err))
 			failed++
 			continue
+		}
+		// Integrity guard: confirm the rebuilt DAG resolves entirely from the
+		// local datastore. A missing block means the DB metadata we rebuilt from
+		// is wrong or the blob data was never uploaded — saving this root would
+		// record a bad CID. Fail the epoch instead and point at backfill-ipfs.
+		if strict && g.ipfs != nil {
+			vctx, vcancel := context.WithTimeout(ctx, 30*time.Second)
+			verr := g.ipfs.VerifyLocal(vctx, epochResult.CID)
+			vcancel()
+			if verr != nil {
+				onDone(epoch, fmt.Errorf("integrity check failed (DB metadata likely wrong or blob data missing) — run `backfill-ipfs -from %d -to %d` to re-fetch and self-heal: %w", epoch, epoch, verr))
+				failed++
+				continue
+			}
 		}
 		// Persist the corrected row using a context detached from ctx's
 		// cancellation: an interrupt during the (best-effort) pin above must not
