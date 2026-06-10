@@ -1023,7 +1023,7 @@ re-upload missing data; use `backfill-ipfs` for that.
 
 Recursive `pin/add` is heavier than a block upload (Kubo walks the DAG), so it
 runs at a gentler default concurrency and is **not** bound by `IPFS_TIMEOUT`.
-Progress (`pinning: N/M (P%, F failed)`) prints to stderr. Flags:
+Progress (`pinning: N/M (P%, F failed, I incomplete)`) prints to stderr. Flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -1035,9 +1035,32 @@ Progress (`pinning: N/M (P%, F failed)`) prints to stderr. Flags:
 
 The run is resumable: any epochs that still fail after retries are listed in a
 final warning (with the first error surfaced as a sample), and re-running
-`pin-existing` skips everything already pinned and retries only the rest. If an
-epoch keeps failing, its blocks may not be on the node — re-upload it with
-`backfill-ipfs -from <epoch> -to <epoch>`.
+`pin-existing` skips everything already pinned and retries only the rest.
+
+**Incomplete vs. failed.** Before each recursive pin, `pin-existing` runs an
+offline `VerifyLocal` preflight (`refs -r ... offline=true`). If a child block
+is missing from the local datastore the recursive pin would only hang fetching
+it over bitswap until `-pin-timeout` fires — and retrying never helps, because
+nothing changes between attempts. Such epochs are reported separately as
+**incomplete** (not *failed*) and skipped immediately. They will keep showing up
+on every re-run until the data is restored:
+
+```
+WARN some epochs have an incomplete local DAG; re-running won't help — re-upload them ...
+  count=14 first=[453411 453412 ...]
+```
+
+To fix them, re-upload the listed epochs so the missing blocks are rewritten,
+then pin:
+
+```bash
+blobscan-ipld backfill-ipfs -from 453411 -to 453429   # rewrite missing blocks
+blobscan-ipld pin-existing                            # now the pins succeed
+```
+
+A genuinely *failed* (not incomplete) epoch is a transient error (slow node,
+timeout); those are retried within the run and clear on a plain re-run. The
+process exits non-zero if any epoch is left failed **or** incomplete.
 
 Equivalent shell one-liner, if you prefer driving Kubo directly:
 

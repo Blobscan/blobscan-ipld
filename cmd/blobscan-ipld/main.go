@@ -681,20 +681,22 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 	// to avoid saturating the node; override with -workers.
 	jobs := make(chan pinJob, len(todo))
 	var (
-		wg     sync.WaitGroup
-		mu     sync.Mutex
-		pinned int
-		failed int
-		done   int
+		wg         sync.WaitGroup
+		mu         sync.Mutex
+		pinned     int
+		failed     int
+		incomplete int
+		done       int
 	)
 	total := len(todo)
 	var (
-		failedEpochs []uint64 // epochs whose pin failed after retries; re-run to retry them
-		sampleErr    error    // first failure, surfaced so the cause is visible
+		failedEpochs     []uint64 // transient pin failures; re-run to retry them
+		incompleteEpochs []uint64 // DAG not fully local; must be re-uploaded, retrying won't help
+		sampleErr        error    // first failure, surfaced so the cause is visible
 	)
 	report := func() {
-		fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d  (%.0f%%, %d failed)   ",
-			done, total, float64(done)/float64(total)*100, failed)
+		fmt.Fprintf(os.Stderr, "\r  pinning: %d/%d  (%.0f%%, %d failed, %d incomplete)   ",
+			done, total, float64(done)/float64(total)*100, failed, incomplete)
 	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -704,14 +706,23 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 				err := pinWithRetry(ctx, ipfsClient, j.cid, pinTimeout, pinRetries)
 				mu.Lock()
 				done++
-				if err != nil {
+				switch {
+				case err == nil:
+					pinned++
+				case errors.Is(err, errIncompleteDAG):
+					// Retrying won't help — the epoch's blocks aren't all
+					// local. Track separately so the operator re-uploads it.
+					incomplete++
+					incompleteEpochs = append(incompleteEpochs, j.epoch)
+					if sampleErr == nil {
+						sampleErr = err
+					}
+				default:
 					failed++
 					if sampleErr == nil {
 						sampleErr = err
 					}
 					failedEpochs = append(failedEpochs, j.epoch)
-				} else {
-					pinned++
 				}
 				report()
 				mu.Unlock()
@@ -730,19 +741,49 @@ func cmdPinExisting(ctx context.Context, cfg *config.Config, log *slog.Logger, a
 		log.Warn("some epochs could not be pinned; re-run pin-existing to retry them",
 			"count", len(failedEpochs), "first", firstN(failedEpochs, 10))
 	}
+	if len(incompleteEpochs) > 0 {
+		sortUint64(incompleteEpochs)
+		log.Warn("some epochs have an incomplete local DAG; re-running won't help — re-upload them (e.g. backfill-ipfs for these epochs) before pinning",
+			"count", len(incompleteEpochs), "first", firstN(incompleteEpochs, 10))
+	}
 	if sampleErr != nil {
 		log.Warn("sample pin failure (first error encountered)", "err", sampleErr)
 	}
-	log.Info("pin-existing complete", "pinned", pinned, "failed", failed)
-	if failed > 0 {
+	log.Info("pin-existing complete", "pinned", pinned, "failed", failed, "incomplete", incomplete)
+	if failed > 0 || incomplete > 0 {
 		os.Exit(1)
 	}
 }
 
+// errIncompleteDAG marks a pin that was skipped because the DAG is not fully
+// present in the local datastore. A recursive pin/add would hang trying to
+// bitswap-fetch the missing children until the deadline, and retries can't help
+// because nothing changes between attempts — the epoch must be re-uploaded.
+// Wrapped (not returned bare) so the missing-CID detail stays in the message.
+var errIncompleteDAG = errors.New("DAG incomplete locally; re-upload the epoch")
+
 // pinWithRetry pins cid, retrying transient failures with a fresh per-attempt
 // deadline. Recursive pin/add has no client-side timeout (see ipfs.Client), so
 // each attempt is bounded by perAttempt to avoid hanging on a stuck pin.
+//
+// Before pinning it runs an offline VerifyLocal preflight: if a child block is
+// missing locally the recursive pin is doomed to time out, so we skip it and
+// return errIncompleteDAG immediately instead of burning perAttempt × retries.
 func pinWithRetry(ctx context.Context, ipfsClient *ipfs.Client, c cid.Cid, perAttempt time.Duration, retries int) error {
+	// Preflight: offline DAG walk fails fast on a missing block rather than
+	// hanging on bitswap. Bound it by perAttempt like a pin attempt.
+	vctx, cancel := context.WithTimeout(ctx, perAttempt)
+	verr := ipfsClient.VerifyLocal(vctx, c)
+	cancel()
+	if verr != nil {
+		// Only treat a confirmed missing-block result as fatal; a verify that
+		// failed for some other reason (timeout, transport) falls through to
+		// the normal pin path, which has its own retry/error handling.
+		if strings.Contains(verr.Error(), "block missing locally") {
+			return fmt.Errorf("%w: %v", errIncompleteDAG, verr)
+		}
+	}
+
 	var err error
 	for attempt := 0; attempt <= retries; attempt++ {
 		if ctx.Err() != nil {
