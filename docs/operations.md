@@ -850,12 +850,16 @@ Set the `network.beacon_rpc` to such an endpoint before running `backfill-ipfs`.
 ## Exporting blob CID references (export-blob-refs)
 
 The `export-blob-refs` subcommand exports all blob CID references from the
-local DB as a CSV file that can be directly imported into blobscan's
-`blob_data_storage_reference` table.
+local DB as a file that can be directly imported into blobscan's
+`blob_data_storage_reference` table. Both CSV and PostgreSQL binary COPY
+formats are supported.
 
 ```bash
-# Export all blobs to a file
+# Export all blobs to a CSV file
 ./blobscan-ipld export-blob-refs -out /tmp/refs.csv
+
+# Export in binary format (faster import, ~30% less I/O)
+./blobscan-ipld export-blob-refs -binary -out /tmp/refs.bin
 
 # Export a specific epoch range to stdout
 ./blobscan-ipld export-blob-refs -from 269568 -to 270000
@@ -867,50 +871,63 @@ local DB as a CSV file that can be directly imported into blobscan's
 |------|-------------|
 | `-from N` | First epoch to export (default: 0) |
 | `-to N` | Last epoch to export (default: max epoch in DB) |
-| `-out PATH` | Output CSV file path (default: stdout) |
+| `-out PATH` | Output file path (default: stdout) |
 | `-meta` | Include `meta_reference` column in output (default: off) |
+| `-binary` | Write PostgreSQL binary COPY format instead of CSV (faster import) |
 
 **Requirements:**
 - `POSTGRES_DSN` must be set.
 
-**CSV format:**
+**Output formats:**
 
-By default the output CSV has three columns:
+*CSV (default):* Three columns, with an optional fourth when `-meta` is set.
 
 ```
 blob_hash,storage,data_reference
 0x01ab…,ipfs,bafyrei…
 ```
 
-With `-meta`, a fourth column is added:
-
-```
-blob_hash,storage,data_reference,meta_reference
-0x01ab…,ipfs,bafyrei…,bafyrei…
-```
+*Binary (`-binary`):* PostgreSQL binary COPY format. Smaller files and
+significantly faster import because Postgres skips CSV parsing and index
+maintenance can be deferred. Use this for large exports (hundreds of MB+).
 
 **Importing into blobscan:**
 
-After the export finishes, the command prints ready-to-use SQL import
-instructions to **stderr**. These include both a simple `\copy` and an
-upsert variant with `ON CONFLICT`. The instructions adapt automatically
-to the output file path and whether `-meta` was used.
+After the export finishes, the command prints ready-to-use `\copy` and
+upsert instructions to **stderr**, adapted to the chosen format and flags.
 
-For reference, a simple import looks like:
+CSV import:
 
 ```bash
 psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(blob_hash, storage, data_reference) FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true)"
 ```
 
-And an upsert via a temp staging table:
+Binary import (faster):
+
+```bash
+psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(blob_hash, storage, data_reference) FROM '/tmp/refs.bin' WITH (FORMAT binary)"
+```
+
+Upsert via a temp staging table (binary example):
 
 ```sql
 CREATE TEMP TABLE staging (LIKE blob_data_storage_reference INCLUDING ALL);
-\copy staging(blob_hash, storage, data_reference) FROM '/tmp/refs.csv' WITH (FORMAT csv, HEADER true);
+\copy staging(blob_hash, storage, data_reference) FROM '/tmp/refs.bin' WITH (FORMAT binary);
 INSERT INTO blob_data_storage_reference(blob_hash, storage, data_reference)
 SELECT blob_hash, storage, data_reference FROM staging
 ON CONFLICT (blob_hash, storage) DO UPDATE SET
   data_reference = EXCLUDED.data_reference;
+```
+
+**Performance tip for large imports:** drop indexes on `blob_data_storage_reference`
+before loading and rebuild them after. This avoids per-row index maintenance:
+
+```sql
+-- Before import
+DROP INDEX IF EXISTS <index_name>;
+
+-- After import
+CREATE INDEX <index_name> ON blob_data_storage_reference (...);
 ```
 
 ---

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -75,6 +76,7 @@ Examples:
   blobscan-ipld export-blob-refs -out /tmp/refs.csv
   blobscan-ipld export-blob-refs -from 300000 -to 300099
   blobscan-ipld export-blob-refs -meta -out /tmp/refs.csv
+  blobscan-ipld export-blob-refs -binary -out /tmp/refs.bin
   blobscan-ipld summary
   blobscan-ipld summary -gaps -empty -top 10 -monthly -check-ipfs
   blobscan-ipld repair-epochs
@@ -807,14 +809,54 @@ func firstN(s []uint64, n int) []uint64 {
 	return s
 }
 
+// pgBinaryCopyWriter writes rows in PostgreSQL binary COPY format.
+// See https://www.postgresql.org/docs/current/sql-copy.html#id-1.9.3.55.9.4
+type pgBinaryCopyWriter struct {
+	w   io.Writer
+	buf [4]byte
+}
+
+func newPGBinaryCopyWriter(w io.Writer) (*pgBinaryCopyWriter, error) {
+	// Signature + flags (OIDs not included) + header extension area length (0).
+	header := []byte("PGCOPY\n\xff\r\n\x00")
+	header = append(header, 0, 0, 0, 0) // flags
+	header = append(header, 0, 0, 0, 0) // header extension area length
+	_, err := w.Write(header)
+	return &pgBinaryCopyWriter{w: w}, err
+}
+
+func (p *pgBinaryCopyWriter) writeRow(fields ...string) error {
+	binary.BigEndian.PutUint16(p.buf[:2], uint16(len(fields)))
+	if _, err := p.w.Write(p.buf[:2]); err != nil {
+		return err
+	}
+	for _, f := range fields {
+		binary.BigEndian.PutUint32(p.buf[:], uint32(len(f)))
+		if _, err := p.w.Write(p.buf[:]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(p.w, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *pgBinaryCopyWriter) close() error {
+	// File trailer: field count = -1 (0xFFFF as int16).
+	_, err := p.w.Write([]byte{0xff, 0xff})
+	return err
+}
+
 // export-blob-refs: export blob CID references as CSV importable into blobscan's
 // blob_data_storage_reference table.
 func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger, args []string) {
 	fs := flag.NewFlagSet("export-blob-refs", flag.ExitOnError)
 	fromEpoch := fs.Uint64("from", 0, "first epoch to export (default: 0)")
 	toEpoch := fs.Uint64("to", 0, "last epoch to export (default: max epoch in DB)")
-	outPath := fs.String("out", "", "output CSV file path (default: stdout)")
+	outPath := fs.String("out", "", "output file path (default: stdout)")
 	includeMeta := fs.Bool("meta", false, "include meta_reference column in output")
+	binary_ := fs.Bool("binary", false, "write PostgreSQL binary COPY format instead of CSV (faster import)")
 	_ = fs.Parse(args)
 
 	if cfg.Storage.PostgresDSN == "" {
@@ -858,43 +900,92 @@ func cmdExportBlobRefs(ctx context.Context, cfg *config.Config, log *slog.Logger
 		out = os.Stdout
 	}
 
-	w := csv.NewWriter(out)
-	header := []string{"blob_hash", "storage", "data_reference"}
-	if *includeMeta {
-		header = append(header, "meta_reference")
-	}
-	if err := w.Write(header); err != nil {
-		log.Error("failed to write CSV header", "err", err)
-		os.Exit(1)
-	}
-	for _, ref := range refs {
-		row := []string{ref.VersionedHash, "ipfs", ref.DataCID}
-		if *includeMeta {
-			row = append(row, ref.MetaCID)
-		}
-		if err := w.Write(row); err != nil {
-			log.Error("failed to write CSV row", "err", err)
+	if *binary_ {
+		bw, err := newPGBinaryCopyWriter(out)
+		if err != nil {
+			log.Error("failed to write binary header", "err", err)
 			os.Exit(1)
 		}
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
-		log.Error("CSV write error", "err", err)
-		os.Exit(1)
+		for _, ref := range refs {
+			fields := []string{ref.VersionedHash, "ipfs", ref.DataCID}
+			if *includeMeta {
+				fields = append(fields, ref.MetaCID)
+			}
+			if err := bw.writeRow(fields...); err != nil {
+				log.Error("failed to write binary row", "err", err)
+				os.Exit(1)
+			}
+		}
+		if err := bw.close(); err != nil {
+			log.Error("failed to write binary trailer", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		w := csv.NewWriter(out)
+		header := []string{"blob_hash", "storage", "data_reference"}
+		if *includeMeta {
+			header = append(header, "meta_reference")
+		}
+		if err := w.Write(header); err != nil {
+			log.Error("failed to write CSV header", "err", err)
+			os.Exit(1)
+		}
+		for _, ref := range refs {
+			row := []string{ref.VersionedHash, "ipfs", ref.DataCID}
+			if *includeMeta {
+				row = append(row, ref.MetaCID)
+			}
+			if err := w.Write(row); err != nil {
+				log.Error("failed to write CSV row", "err", err)
+				os.Exit(1)
+			}
+		}
+		w.Flush()
+		if err := w.Error(); err != nil {
+			log.Error("CSV write error", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	log.Info("export-blob-refs complete", "rows", len(refs), "from", *fromEpoch, "to", *toEpoch)
 
 	// Print SQL import instructions to stderr.
-	csvFile := *outPath
-	if csvFile == "" {
-		csvFile = "<file.csv>"
-	}
+	outFile := *outPath
 	cols := "blob_hash, storage, data_reference"
 	if *includeMeta {
 		cols = "blob_hash, storage, data_reference, meta_reference"
 	}
-	fmt.Fprintf(os.Stderr, `
+
+	if *binary_ {
+		if outFile == "" {
+			outFile = "<file.bin>"
+		}
+		fmt.Fprintf(os.Stderr, `
+To import into blobscan, run:
+
+  psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(%s) FROM '%s' WITH (FORMAT binary)"
+
+To upsert (update existing rows):
+
+  psql "$BLOBSCAN_DATABASE_URL" <<'SQL'
+  CREATE TEMP TABLE staging (LIKE blob_data_storage_reference INCLUDING ALL);
+  \copy staging(%s) FROM '%s' WITH (FORMAT binary)
+  INSERT INTO blob_data_storage_reference(%s)
+  SELECT %s FROM staging
+  ON CONFLICT (blob_hash, storage) DO UPDATE SET
+    data_reference = EXCLUDED.data_reference`+func() string {
+			if *includeMeta {
+				return ",\n    meta_reference = EXCLUDED.meta_reference"
+			}
+			return ""
+		}()+`;
+  SQL
+`, cols, outFile, cols, outFile, cols, cols)
+	} else {
+		if outFile == "" {
+			outFile = "<file.csv>"
+		}
+		fmt.Fprintf(os.Stderr, `
 To import into blobscan, run:
 
   psql "$BLOBSCAN_DATABASE_URL" -c "\copy blob_data_storage_reference(%s) FROM '%s' WITH (FORMAT csv, HEADER true)"
@@ -908,13 +999,14 @@ To upsert (update existing rows):
   SELECT %s FROM staging
   ON CONFLICT (blob_hash, storage) DO UPDATE SET
     data_reference = EXCLUDED.data_reference`+func() string {
-		if *includeMeta {
-			return ",\n    meta_reference = EXCLUDED.meta_reference"
-		}
-		return ""
-	}()+`;
+			if *includeMeta {
+				return ",\n    meta_reference = EXCLUDED.meta_reference"
+			}
+			return ""
+		}()+`;
   SQL
-`, cols, csvFile, cols, csvFile, cols, cols)
+`, cols, outFile, cols, outFile, cols, cols)
+	}
 }
 
 // summary: human-readable statistics about the indexed data.
