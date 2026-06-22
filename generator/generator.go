@@ -82,7 +82,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 			return nil, fmt.Errorf("generator: EXECUTION_RPC requires BEACON_RPC to resolve execution payloads")
 		}
 		elClient = beacon.NewExecutionClient(beaconClient, cfg.Network.ExecutionRPC, cfg.Network.BeaconTimeout)
-		log.Info("✓ Execution-layer enrichment enabled", "execution_rpc", cfg.Network.ExecutionRPC)
+		log.Info("✓ Execution-layer enrichment enabled")
 	}
 
 	var ipfsClient *ipfs.Client
