@@ -70,6 +70,7 @@ type GeneratorConfig struct {
 	HAMTThreshold        int           // blobs per epoch before switching to HAMT
 	PollInterval         time.Duration // how often to check for new finalized epochs
 	StartEpoch           uint64        // first epoch to process (0 = genesis)
+	startEpochSet        bool          // true when GENERATOR_START_EPOCH was explicitly provided
 	Workers              int           // parallel blob-processing goroutines
 	BeaconWorkers        int           // parallel slot fetches per epoch
 	BackfillEpochWorkers int           // parallel epoch builders in the backfill pipeline (default 4)
@@ -167,6 +168,7 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("GENERATOR_START_EPOCH"); v != "" {
 		if i, err := strconv.ParseUint(v, 10, 64); err == nil {
 			c.Generator.StartEpoch = i
+			c.Generator.startEpochSet = true
 		}
 	}
 	if v := os.Getenv("GENERATOR_HAMT_THRESHOLD"); v != "" {
@@ -299,7 +301,7 @@ func (c *Config) applyDefaults() {
 	if c.Network.Beacon429Backoff == 0 {
 		c.Network.Beacon429Backoff = 1 * time.Second
 	}
-	if c.Generator.StartEpoch == 0 {
+	if !c.Generator.startEpochSet {
 		if epoch, ok := dencunEpoch(c.Network.Name); ok {
 			c.Generator.StartEpoch = epoch
 		}
