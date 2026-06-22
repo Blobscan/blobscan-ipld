@@ -101,11 +101,20 @@ A minimal Ethereum Beacon Node REST API (v1) client.
 | `GetFinalityCheckpoints` | `GET /eth/v1/beacon/states/{id}/finality_checkpoints` | Returns finalized and justified epoch numbers |
 | `GetBlockHeader` | `GET /eth/v1/beacon/headers/{id}` | Returns slot, proposer, roots for a block |
 | `GetBlobSidecars` | `GET /eth/v1/beacon/blob_sidecars/{id}` | Returns all blob sidecars for a slot |
+| `GetExecutionPayloadInfo` | `GET /eth/v2/beacon/blocks/{id}` | Returns the execution-layer block hash + number embedded in a beacon block |
 | `FetchEpochInput` | — | Iterates all 32 slots of an epoch, collects sidecars, returns `EpochInput` |
 
 Missed slots (HTTP 404) are silently skipped. An optional `ELClient` interface
-can be passed to `FetchEpochInput` to enrich blobs with `txHash` and
-`blockNumber` from the execution layer.
+can be passed to `FetchEpochInput` to enrich blobs with `txHash`, `blockNumber`,
+and the execution-layer `blockHash`.
+
+`ExecutionClient` (in `beacon/elclient.go`) implements `ELClient` against an
+execution-layer JSON-RPC endpoint (`EXECUTION_RPC`). For each beacon block root
+it resolves the execution payload via `GetExecutionPayloadInfo`, then calls
+`eth_getBlockByHash` to map each transaction's `blobVersionedHashes` to its tx
+hash. Results are cached per block root, so a block carrying many blobs hits the
+EL endpoint only once. When `EXECUTION_RPC` is unset, `FetchEpochInput` receives
+`nil` and EL enrichment is skipped.
 
 ### `state`
 Defines the `Backend` interface for progress tracking:

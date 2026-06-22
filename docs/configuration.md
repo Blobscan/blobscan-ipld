@@ -11,10 +11,29 @@ is needed. Variables that are unset or empty fall back to the listed default.
 |----------|----------|---------|-------------|
 | `NETWORK_NAME` | **yes** | — | Network identifier: `mainnet`, `sepolia`, `gnosis`, `hoodi` |
 | `BEACON_RPC` | conditional | `""` | Beacon Node REST API base URL (set by compose files from network-specific `{MAINNET,SEPOLIA,HOODI}_BEACON_RPC`). Required for `run` / `epoch` subcommands; not needed for `serve` |
-| `BEACON_TIMEOUT` | no | `60s` | HTTP request timeout for all Beacon Node API calls |
-| `BEACON_RATE_LIMIT` | no | `100` | Max requests/second to beacon RPC. Set to ~80-90% of provider limit (Quicknode: 125 req/s → use `100`) |
+| `EXECUTION_RPC` | no | `""` | Execution-layer JSON-RPC URL. When set, each blob is enriched with its execution-layer transaction hash, block number, and block hash before being persisted to the DB. Requires `BEACON_RPC` (the beacon block root is mapped to its execution payload first). Leave empty to skip EL enrichment — those columns stay empty. **Forward-only**: enrichment applies only to epochs indexed after it is enabled; see the note below |
+| `BEACON_TIMEOUT` | no | `60s` | HTTP request timeout for all Beacon Node API calls (also used for EL JSON-RPC calls) |
+| `BEACON_RATE_LIMIT` | no | `100` | Max requests/second to beacon RPC. Set to ~80-90% of provider limit |
 | `BEACON_RATE_BURST` | no | `32` | Token bucket burst size. Controls how many requests can fire at once |
 | `BEACON_429_BACKOFF` | no | `1s` | Initial backoff when a 429 error is received. Doubles on each consecutive 429, capped at 60s |
+
+### `EXECUTION_RPC` is forward-only
+
+EL enrichment applies only to epochs indexed **after** `EXECUTION_RPC` is set.
+Blobs already in the DB are **not** retroactively enriched, and there is no
+backfill command for this.
+
+The reason is that `txHash`, `blockNumber`, and `blockHash` are part of the
+`BlobMetadata` IPLD node, so they contribute to its `metaCID` (the IPFS content
+address). A blob first indexed without EL data has a different `metaCID` than the
+same blob processed with EL data. Retroactively adding EL fields would therefore
+change the metadata CIDs of existing blobs and orphan the previously uploaded
+metadata blocks on IPFS — so it is deliberately not done.
+
+`backfill-ipfs` does **not** fill this gap: it is an IPFS re-upload / self-heal
+tool for deployments that ran with `IPFS_SKIP_UPLOAD=true`, not an EL-data
+backfill. If you enable `EXECUTION_RPC` and want EL data on historical epochs,
+re-index those epochs from scratch (accepting that their `metaCID`s will change).
 
 ---
 
@@ -117,6 +136,7 @@ The process exits at startup if any of these are violated:
 Conditionally required at the subcommand level (validated at runtime, not startup):
 
 - `BEACON_RPC` — required for `run` and `epoch` subcommands
+- `EXECUTION_RPC` — if set, `BEACON_RPC` must also be set (the generator fails fast at startup otherwise)
 - `POSTGRES_DSN` — required for `export-car`, `export-car-range`, `finalize-epoch`, `backfill-ipfs`
 
 ---

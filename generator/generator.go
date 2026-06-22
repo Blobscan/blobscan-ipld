@@ -32,7 +32,8 @@ import (
 // Generator is the top-level DAG generation orchestrator.
 type Generator struct {
 	cfg            *config.Config
-	beacon         *beacon.Client // nil when beacon_rpc is not configured
+	beacon         *beacon.Client  // nil when beacon_rpc is not configured
+	el             beacon.ELClient // nil when execution_rpc is not configured
 	ipfs           *ipfs.Client
 	db             *db.Client
 	state          state.Backend
@@ -70,6 +71,18 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 			cfg.Network.SlotsPerEpoch,
 			cfg.Network.SecondsPerSlot,
 		)
+	}
+
+	// Optional execution-layer enrichment: resolves each blob to its EL
+	// transaction hash, block number, and block hash. Requires a beacon client
+	// to map beacon block roots to execution payloads.
+	var elClient beacon.ELClient
+	if cfg.Network.ExecutionRPC != "" {
+		if beaconClient == nil {
+			return nil, fmt.Errorf("generator: EXECUTION_RPC requires BEACON_RPC to resolve execution payloads")
+		}
+		elClient = beacon.NewExecutionClient(beaconClient, cfg.Network.ExecutionRPC, cfg.Network.BeaconTimeout)
+		log.Info("✓ Execution-layer enrichment enabled", "execution_rpc", cfg.Network.ExecutionRPC)
 	}
 
 	var ipfsClient *ipfs.Client
@@ -118,6 +131,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Generator,
 	g := &Generator{
 		cfg:            cfg,
 		beacon:         beaconClient,
+		el:             elClient,
 		ipfs:           ipfsClient,
 		db:             dbClient,
 		state:          stateBackend,
@@ -656,7 +670,7 @@ func (g *Generator) buildEpoch(ctx context.Context, epoch uint64, p *epochProgre
 	if !fromCache {
 		g.logFetchingEpoch(epoch, p)
 		var err error
-		epochInp, err = g.beacon.FetchEpochInput(ctx, epoch, nil)
+		epochInp, err = g.beacon.FetchEpochInput(ctx, epoch, g.el)
 		if err != nil {
 			return out, fmt.Errorf("fetch epoch %d: %w", epoch, err)
 		}
@@ -1315,7 +1329,11 @@ func (g *Generator) BackfillIPFS(ctx context.Context, fromEpoch, toEpoch uint64)
 			continue
 		}
 
-		// Re-fetch fresh blob data from the beacon node.
+		// Re-fetch fresh blob data from the beacon node. EL enrichment is
+		// intentionally NOT applied here (nil): backfill-ipfs is an IPFS
+		// re-upload / CID self-heal tool, and EL enrichment is forward-only.
+		// Passing g.el would change blob metaCIDs for epochs originally indexed
+		// without EL data, rewriting metadata blocks and orphaning the old ones.
 		g.logFetchingEpoch(epoch, p)
 		epochInp, err := g.beacon.FetchEpochInput(ctx, epoch, nil)
 		if err != nil {

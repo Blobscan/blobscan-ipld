@@ -218,14 +218,21 @@ plus a link to the raw blob data.
 |-------|------|-------------|
 | `commitment` | string | KZG commitment, 0x-prefixed hex (48 bytes) |
 | `versionedHash` | string | EIP-4844 versioned hash: `0x01 \|\| SHA256(commitment)[1:]` |
-| `txHash` | string | Execution-layer transaction hash — **empty in current implementation** (ELClient not wired) |
-| `blockNumber` | int | Execution-layer block number — **0 in current implementation** |
-| `blockHash` | string | Beacon block root (`sc.BlockRoot`) — overwritten with EL block hash if ELClient is wired |
+| `txHash` | string | Execution-layer transaction hash. Populated when `EXECUTION_RPC` is configured; empty otherwise |
+| `blockNumber` | int | Execution-layer block number. Populated when `EXECUTION_RPC` is configured; `0` otherwise |
+| `blockHash` | string | Beacon block root (`sc.BlockRoot`) by default; overwritten with the execution-layer block hash when `EXECUTION_RPC` is configured |
 | `slot` | int | Beacon slot number |
 | `epoch` | int | Beacon epoch number |
 | `index` | int | Blob index within the transaction (0-based) |
 | `size` | int | Raw blob size in bytes (always 131072 = 128 KiB) |
 | `data` | &Blob | CID link to the raw blob block (codec=raw) |
+
+> **Note:** `txHash`, `blockNumber`, and `blockHash` are part of this node, so
+> they contribute to its `metaCID`. A blob indexed without EL enrichment
+> (`EXECUTION_RPC` unset) has a different `metaCID` than the same blob indexed
+> with it. EL enrichment is therefore forward-only — existing blobs are not
+> retroactively updated. See `docs/configuration.md` → "`EXECUTION_RPC` is
+> forward-only".
 
 ### Example
 

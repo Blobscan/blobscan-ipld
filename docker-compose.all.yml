@@ -51,7 +51,8 @@ services:
     environment:
       NETWORK_NAME: mainnet
       BEACON_RPC: "${MAINNET_BEACON_RPC:?MAINNET_BEACON_RPC is required}"
-      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      EXECUTION_RPC: "${MAINNET_EXECUTION_RPC:-}"  # optional: enables EL tx_hash/block enrichment
+      BEACON_RATE_LIMIT: "100"  # Adjust to ~80-90% of your RPC provider's req/s limit
       BEACON_RATE_BURST: "32"
       BEACON_429_BACKOFF: "1s"
       BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)
@@ -78,7 +79,8 @@ services:
     environment:
       NETWORK_NAME: sepolia
       BEACON_RPC: "${SEPOLIA_BEACON_RPC:?SEPOLIA_BEACON_RPC is required}"
-      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      EXECUTION_RPC: "${SEPOLIA_EXECUTION_RPC:-}"  # optional: enables EL tx_hash/block enrichment
+      BEACON_RATE_LIMIT: "100"  # Adjust to ~80-90% of your RPC provider's req/s limit
       BEACON_RATE_BURST: "32"
       BEACON_429_BACKOFF: "1s"
       BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)
@@ -105,7 +107,8 @@ services:
     environment:
       NETWORK_NAME: hoodi
       BEACON_RPC: "${HOODI_BEACON_RPC:?HOODI_BEACON_RPC is required}"
-      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      EXECUTION_RPC: "${HOODI_EXECUTION_RPC:-}"  # optional: enables EL tx_hash/block enrichment
+      BEACON_RATE_LIMIT: "100"  # Adjust to ~80-90% of your RPC provider's req/s limit
       BEACON_RATE_BURST: "32"
       BEACON_429_BACKOFF: "1s"
       BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)
@@ -132,7 +135,8 @@ services:
     environment:
       NETWORK_NAME: gnosis
       BEACON_RPC: "${GNOSIS_BEACON_RPC:?GNOSIS_BEACON_RPC is required}"
-      BEACON_RATE_LIMIT: "100"  # Adjust based on your RPC provider's limit (Quicknode: 125 req/s, use ~100)
+      EXECUTION_RPC: "${GNOSIS_EXECUTION_RPC:-}"  # optional: enables EL tx_hash/block enrichment
+      BEACON_RATE_LIMIT: "100"  # Adjust to ~80-90% of your RPC provider's req/s limit
       BEACON_RATE_BURST: "32"
       BEACON_429_BACKOFF: "1s"
       BACKFILL_EPOCH_WORKERS: "4"  # parallel epoch builders during backfill (default 4)

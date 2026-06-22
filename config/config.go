@@ -36,6 +36,7 @@ type BlobscanConfig struct {
 type NetworkConfig struct {
 	Name             string        // e.g. "mainnet", "sepolia"
 	BeaconRPC        string        // Beacon node REST API base URL (optional when using the push API)
+	ExecutionRPC     string        // Execution-layer JSON-RPC URL (optional; enables tx_hash/block_number enrichment)
 	BeaconTimeout    time.Duration // HTTP timeout for beacon requests (optional; default 60s)
 	BeaconRateLimit  float64       // max requests per second to beacon RPC (optional; default 100)
 	BeaconRateBurst  int           // token bucket burst size (optional; default 10)
@@ -96,6 +97,9 @@ func (c *Config) applyEnv() {
 	}
 	if v := os.Getenv("BEACON_RPC"); v != "" {
 		c.Network.BeaconRPC = v
+	}
+	if v := os.Getenv("EXECUTION_RPC"); v != "" {
+		c.Network.ExecutionRPC = v
 	}
 	if v := os.Getenv("BEACON_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

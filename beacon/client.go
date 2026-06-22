@@ -31,6 +31,11 @@ var ErrInsufficientCustody = errors.New(
 		"reconfigure it with --custody-group-count=64 or higher (or equivalent for your client)",
 )
 
+// ErrNoExecutionPayload is returned when a beacon block has no execution payload
+// (a pre-Bellatrix block). Blob-bearing blocks are always post-Deneb, so this
+// should not occur in practice when enriching blob data.
+var ErrNoExecutionPayload = errors.New("beacon block has no execution payload")
+
 // Client is a minimal Beacon Node REST API client (Ethereum Beacon API v1).
 type Client struct {
 	base            string
@@ -197,6 +202,50 @@ func (c *Client) GetBlobSidecars(ctx context.Context, blockID string) ([]BlobSid
 	return resp.Data, nil
 }
 
+// ─── Execution payload ────────────────────────────────────────────────────────
+
+// ExecutionPayloadInfo holds the execution-layer identifiers embedded in a
+// beacon block's execution payload.
+type ExecutionPayloadInfo struct {
+	BlockHash   string // EL block hash, 0x-prefixed hex
+	BlockNumber uint64 // EL block number
+}
+
+// GetExecutionPayloadInfo returns the execution-layer block hash and number for
+// the beacon block identified by blockID (a slot number or beacon block root).
+// Returns ErrNoExecutionPayload for pre-Bellatrix blocks that have no payload.
+func (c *Client) GetExecutionPayloadInfo(ctx context.Context, blockID string) (*ExecutionPayloadInfo, error) {
+	url := fmt.Sprintf("%s/eth/v2/beacon/blocks/%s", c.base, blockID)
+	var resp struct {
+		Data struct {
+			Message struct {
+				Body struct {
+					ExecutionPayload struct {
+						BlockHash   string `json:"block_hash"`
+						BlockNumber string `json:"block_number"`
+					} `json:"execution_payload"`
+				} `json:"body"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := c.get(ctx, url, &resp); err != nil {
+		return nil, fmt.Errorf("beacon: block %s: %w", blockID, err)
+	}
+
+	ep := resp.Data.Message.Body.ExecutionPayload
+	if ep.BlockHash == "" {
+		return nil, ErrNoExecutionPayload
+	}
+	number, err := strconv.ParseUint(ep.BlockNumber, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("beacon: parse execution block_number for %s: %w", blockID, err)
+	}
+	return &ExecutionPayloadInfo{
+		BlockHash:   ep.BlockHash,
+		BlockNumber: number,
+	}, nil
+}
+
 // ─── Genesis ──────────────────────────────────────────────────────────────────
 
 // GetGenesisTime returns the Unix timestamp of the beacon chain genesis.
@@ -311,7 +360,7 @@ func (c *Client) FetchEpochInput(ctx context.Context, epoch uint64, el ELClient)
 				}
 
 				if el != nil {
-					elData, err := el.GetBlobTxData(gctx, sc.BlockRoot, sc.KZGCommitment)
+					elData, err := el.GetBlobTxData(gctx, sc.BlockRoot, versionedHash)
 					if err == nil {
 						bi.TxHash = elData.TxHash
 						bi.BlockNumber = elData.BlockNumber
@@ -340,8 +389,12 @@ func (c *Client) FetchEpochInput(ctx context.Context, epoch uint64, el ELClient)
 // ─── EL client interface ──────────────────────────────────────────────────────
 
 // ELClient is an optional interface for fetching execution-layer data.
+//
+// blockRoot is the beacon block root the blob was included in; versionedHash is
+// the blob's EIP-4844 versioned hash, used to match the specific blob-carrying
+// transaction within the execution block.
 type ELClient interface {
-	GetBlobTxData(ctx context.Context, blockRoot, commitment string) (*ELBlobData, error)
+	GetBlobTxData(ctx context.Context, blockRoot, versionedHash string) (*ELBlobData, error)
 }
 
 // ELBlobData holds execution-layer data for a blob transaction.
