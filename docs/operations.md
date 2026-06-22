@@ -179,15 +179,15 @@ This exports all four volumes (`postgres_data`, `ipfs_data`, `blobscan_data`,
 `blobscan_car`) as compressed tarballs, transfers them to the new machine,
 and restores them into fresh volumes before startup.
 
-### GitHub Container Registry
+### Docker Hub
 
-Pre-built images are published to `ghcr.io/blobscan/blobscan-ipld` on every
-push to `master` and for every version tag. To use them instead of building
-locally:
+Pre-built images are published to `blossomlabs/blobscan-ipld` on Docker Hub on
+every push to `master` and for every version tag. To use them instead of
+building locally:
 
 ```yaml
 # in docker-compose.yml, replace `build: .` with:
-image: ghcr.io/blobscan/blobscan-ipld:latest
+image: blossomlabs/blobscan-ipld:latest
 ```
 
 Tags follow the pattern `latest`, `master`, `sha-<short>`, and `<semver>` for
