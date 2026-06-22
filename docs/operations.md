@@ -113,6 +113,40 @@ docker compose -f docker-compose.sepolia.yml ps
 | IPFS gateway | `8081` | HTTP |
 | IPFS swarm | `4001` | TCP/UDP |
 
+### Exposing the IPFS API on additional interfaces (e.g. VPN/Tailscale)
+
+By default the IPFS API (port 5001) is bound only to `127.0.0.1`. To expose
+it on an additional interface — for example a Tailscale/VPN IP so a
+Kubernetes pod can reach it via a subnet router — set `IPFS_API_EXTRA_BIND`
+in `.env`:
+
+```ini
+IPFS_API_EXTRA_BIND=100.100.100.1:5001:5001
+```
+
+This adds a second `ports` entry in the Compose file alongside the existing
+`127.0.0.1:5001:5001` binding. Recreate the IPFS container to apply it:
+
+```bash
+docker compose up -d --force-recreate ipfs
+```
+
+#### Allow non-localhost API clients (Kubo access control)
+
+Kubo silently drops connections from non-`127.0.0.1` origins unless
+`API.HTTPHeaders.Access-Control-Allow-Origin` is configured. After adding
+the extra bind, run once on the host:
+
+```bash
+docker exec $(docker ps -qf name=ipfs) ipfs config --json \
+  API.HTTPHeaders.Access-Control-Allow-Origin \
+  '["http://100.100.100.1:5001", "http://127.0.0.1:5001"]'
+docker restart $(docker ps -qf name=ipfs)
+```
+
+> **Note:** This writes into the `ipfs_data` volume, so it survives container
+> recreation but must be re-applied if the volume is wiped and re-initialised.
+
 ### Migrating volumes to another machine
 
 To transfer your PostgreSQL, IPFS, and application data to another machine:
