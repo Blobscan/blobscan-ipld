@@ -27,6 +27,7 @@ services:
     ports:
       - "4001:4001"
       - "127.0.0.1:5001:5001"
+      - "${IPFS_API_EXTRA_BIND:-}"
       - "127.0.0.1:8081:8080"
     healthcheck:
       test: ["CMD", "ipfs", "id"]
