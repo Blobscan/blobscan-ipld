@@ -313,9 +313,8 @@ Implements `Backend`. Updates `last_processed_epoch` and persists atomically.
 ## Package `api`
 
 ### `func New(addr string, processor BlobProcessor, finalizer EpochFinalizer, log *slog.Logger) *Server`
-Creates and configures the HTTP server. Routes: `POST /blob`, `GET /healthz`.
-`finalizer` may be `nil`; when nil, `finalize: true` in push requests returns
-an error.
+Creates and configures the HTTP server. Routes: `POST /blob`, `GET /healthz`, `GET /openapi.json`, `GET /docs`.
+`finalizer` may be `nil`; when nil, `finalize: true` in push requests is silently ignored (response has `finalized: false`).
 
 ### `func (s *Server) ListenAndServe() error`
 Starts listening. Blocks until the server stops.

@@ -1,0 +1,206 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "blobscan-ipld push API",
+    "description": "HTTP push API for storing Ethereum EIP-4844 blob data as IPLD DAGs in IPFS.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/blob": {
+      "post": {
+        "summary": "Store a single blob",
+        "description": "Validates, processes, and uploads a single EIP-4844 blob to IPFS as an IPLD DAG. Returns the CIDs of the raw data node and the metadata node. Optionally finalizes the epoch (builds the EpochNode and rebuilds the NetworkRoot) when `finalize` is true.",
+        "operationId": "pushBlob",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlobPushRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Blob stored successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlobPushResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (malformed JSON body, missing fields, wrong data length, bad hex, negative index, slot and epoch both zero or absent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "data: expected 131072 bytes, got 64"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "IPFS upload, DB write, or epoch finalization failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "summary": "Health check",
+        "description": "Returns 200 OK when the server is running.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BlobPushRequest": {
+        "type": "object",
+        "required": ["commitment", "versioned_hash", "data"],
+        "anyOf": [
+          {"required": ["slot"], "properties": {"slot": {"minimum": 1}}},
+          {"required": ["epoch"], "properties": {"epoch": {"minimum": 1}}}
+        ],
+        "description": "At least one of slot or epoch must be present and non-zero; a request with both absent or both equal to 0 is rejected with 400.",
+        "properties": {
+          "commitment": {
+            "type": "string",
+            "description": "KZG commitment, 0x-prefixed hex (48 bytes = 96 hex chars).",
+            "example": "0x8d7a3579b9ca4fc89ef90dfb53b9fdec20f3e7ee3d573df0ca867b92f4f77e63f0ee3240f01b851e40571db52c6a6a83"
+          },
+          "versioned_hash": {
+            "type": "string",
+            "description": "EIP-4844 versioned hash, 0x-prefixed hex (32 bytes).",
+            "example": "0x01b3a1c2d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1"
+          },
+          "data": {
+            "type": "string",
+            "description": "Raw blob field element data, 0x-prefixed hex (131072 bytes = 262144 hex chars)."
+          },
+          "slot": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Beacon slot number (uint64 in Go).",
+            "example": 8626176
+          },
+          "epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Beacon epoch number (uint64 in Go).",
+            "example": 269568
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Blob index within the transaction (0-based). Negative values are rejected with 400.",
+            "example": 0
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "Execution-layer transaction hash (optional).",
+            "example": "0xabc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+          },
+          "block_number": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "EL block number (optional, uint64 in Go). Omit or set to 0 if unknown.",
+            "example": 19500000
+          },
+          "block_hash": {
+            "type": "string",
+            "description": "EL block hash (optional).",
+            "example": "0xdef456abc123def456abc123def456abc123def456abc123def456abc123def4"
+          },
+          "finalize": {
+            "type": "boolean",
+            "description": "If true, build the EpochNode and rebuild the NetworkRoot immediately after storing this blob. Use on the last blob of an epoch when the caller knows the epoch is complete. Requires DB persistence (postgres_dsn configured) and the server to have been started with a finalizer; if either is absent, this flag is silently ignored and the response will have finalized=false.",
+            "example": false
+          }
+        }
+      },
+      "BlobPushResponse": {
+        "type": "object",
+        "required": ["data_cid", "meta_cid", "commitment", "epoch"],
+        "properties": {
+          "data_cid": {
+            "type": "string",
+            "description": "CID of the raw Blob node (codec=raw, sha2-256).",
+            "example": "bafkreib4pqtikzdjlj4zigobmd63lig7u6oxlug24snlr6atjlmlza45dq"
+          },
+          "meta_cid": {
+            "type": "string",
+            "description": "CID of the BlobMetadata node (codec=dag-cbor, sha2-256).",
+            "example": "bafyreiczsscuf4aaan6h2qipwqygvs4uom7eda5rkzlymo3nfqkrjtlvwu"
+          },
+          "commitment": {
+            "type": "string",
+            "description": "Echo of the input KZG commitment.",
+            "example": "0x8d7a3579b9ca4fc89ef90dfb53b9fdec20f3e7ee3d573df0ca867b92f4f77e63f0ee3240f01b851e40571db52c6a6a83"
+          },
+          "epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Echo of the input epoch number (uint64 in Go).",
+            "example": 269568
+          },
+          "finalized": {
+            "type": "boolean",
+            "description": "True if the EpochNode was built during this request (finalize=true was set, DB persistence is enabled, and finalization succeeded).",
+            "example": true
+          },
+          "epoch_cid": {
+            "type": "string",
+            "description": "CID of the EpochNode; only present when finalized is true.",
+            "example": "bafyreig7n5gfmtqsz3m5ommzlzj5wnlb4k6y3v2dcqoh7hpzqmvofwqde"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable error message.",
+            "example": "data: expected 131072 bytes, got 64"
+          }
+        }
+      }
+    }
+  }
+}

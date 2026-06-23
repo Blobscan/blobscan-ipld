@@ -175,6 +175,28 @@ recorded externally.
 
 ## Endpoints
 
+### `GET /docs`
+
+Interactive Swagger UI — browse and try all endpoints in the browser.
+
+```
+http://localhost:8080/docs
+```
+
+> **Note:** The `data` field requires exactly 131072 bytes (262144 hex chars). Swagger UI's
+> Try it out will leave it blank — paste a real blob hex string before clicking Execute.
+
+### `GET /openapi.json`
+
+Returns the OpenAPI 3.1 specification as JSON. Useful for code generation or
+importing into tools like Postman.
+
+```bash
+curl http://localhost:8080/openapi.json
+```
+
+---
+
 ### `POST /blob`
 
 Store a single blob in IPFS and persist its CIDs to PostgreSQL.
@@ -208,7 +230,7 @@ curl -X POST http://localhost:8080/blob \
   -d '{
     "commitment":     "0x8d7a3579...",
     "versioned_hash": "0x01b3a1c2...",
-    "data":           "0x0000....",
+    "data":           "<0x-prefixed hex, exactly 131072 bytes = 262144 hex chars>",
     "slot":           8626176,
     "epoch":          269568,
     "index":          0,
@@ -226,7 +248,7 @@ curl -X POST http://localhost:8080/blob \
   -d '{
     "commitment":     "0xb1c2...",
     "versioned_hash": "0x01d3...",
-    "data":           "0x0000....",
+    "data":           "<0x-prefixed hex, exactly 131072 bytes = 262144 hex chars>",
     "slot":           8626208,
     "epoch":          269568,
     "index":          5,

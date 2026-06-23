@@ -6,6 +6,7 @@ package api
 
 import (
 	"context"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,9 @@ import (
 	"strings"
 	"time"
 )
+
+//go:embed openapi.json
+var openapiSpec []byte
 
 // BlobPushRequest is the JSON body accepted by POST /blob.
 type BlobPushRequest struct {
@@ -92,6 +96,8 @@ func New(
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /blob", s.handlePushBlob)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /openapi.json", s.handleOpenAPISpec)
+	mux.HandleFunc("GET /docs", s.handleSwaggerUI)
 
 	s.srv = &http.Server{
 		Addr:         addr,
@@ -123,6 +129,34 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleOpenAPISpec(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	_, _ = w.Write(openapiSpec)
+}
+
+const swaggerUIHTML = `<!DOCTYPE html>
+<html>
+<head>
+  <title>blobscan-ipld API</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.32.8/swagger-ui.css">
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5.32.8/swagger-ui-bundle.js"></script>
+<script>
+  SwaggerUIBundle({ url: "/openapi.json", dom_id: "#swagger-ui" })
+</script>
+</body>
+</html>`
+
+func (s *Server) handleSwaggerUI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(swaggerUIHTML))
 }
 
 func (s *Server) handlePushBlob(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +222,9 @@ func validateBlobRequest(req BlobPushRequest) error {
 	}
 	if req.Epoch == 0 && req.Slot == 0 {
 		return fmt.Errorf("epoch or slot is required")
+	}
+	if req.Index < 0 {
+		return fmt.Errorf("index must be non-negative")
 	}
 	return nil
 }
