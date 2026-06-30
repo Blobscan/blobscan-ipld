@@ -69,33 +69,42 @@ type BlobProcessor func(ctx context.Context, req BlobPushRequest) (BlobPushRespo
 // its EpochNode CID string.
 type EpochFinalizer func(ctx context.Context, epoch uint64) (epochCID string, err error)
 
+// ReadinessChecker reports whether the downstream dependencies the API relies on
+// (notably the kubo node) are reachable. A nil error means ready.
+type ReadinessChecker func(ctx context.Context) error
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 // Server is the HTTP API server.
 type Server struct {
 	processor BlobProcessor
 	finalizer EpochFinalizer
+	ready     ReadinessChecker
 	log       *slog.Logger
 	srv       *http.Server
 }
 
 // New creates an API server.
 // finalizer may be nil; if nil, finalization via POST /blob is disabled.
+// ready may be nil; if nil, GET /readyz always reports ready.
 func New(
 	addr string,
 	processor BlobProcessor,
 	finalizer EpochFinalizer,
+	ready ReadinessChecker,
 	log *slog.Logger,
 ) *Server {
 	s := &Server{
 		processor: processor,
 		finalizer: finalizer,
+		ready:     ready,
 		log:       log,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /blob", s.handlePushBlob)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPISpec)
 	mux.HandleFunc("GET /docs", s.handleSwaggerUI)
 
@@ -161,8 +170,37 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
+// handleHealth is a process-liveness probe: it returns 200 as long as the HTTP
+// server is accepting requests, without touching any downstream dependency.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleReady is a readiness probe: it verifies the kubo node is reachable via
+// the injected ReadinessChecker. A nil checker means there is nothing to verify
+// (e.g. uploads disabled), so it reports ready. On failure it returns 503 so
+// callers can drain traffic instead of restarting the process.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if s.ready == nil {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := s.ready(ctx); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "unhealthy",
+			"error":  err.Error(),
+		})
+		return
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

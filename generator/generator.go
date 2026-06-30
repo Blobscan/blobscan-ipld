@@ -168,6 +168,17 @@ func (g *Generator) Close() {
 	}
 }
 
+// Ping reports whether the kubo node is reachable, for use as an API readiness
+// probe. It returns nil when uploads are disabled (g.ipfs is nil, i.e.
+// IPFS_SKIP_UPLOAD=true) so readiness does not fail in upload-skipping modes.
+func (g *Generator) Ping(ctx context.Context) error {
+	if g.ipfs == nil {
+		return nil
+	}
+	_, err := g.ipfs.GetNodeInfo(ctx)
+	return err
+}
+
 // Run starts the epoch processing pipeline. It blocks until ctx is cancelled.
 // Requires beacon_rpc to be configured.
 //

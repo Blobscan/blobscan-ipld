@@ -217,7 +217,7 @@ func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, args []
 		listen = ":8080"
 	}
 
-	srv := api.New(listen, gen.ProcessBlobInput, gen.FinalizeEpochWithCID, log)
+	srv := api.New(listen, gen.ProcessBlobInput, gen.FinalizeEpochWithCID, gen.Ping, log)
 
 	// Start API server in background.
 	srvErr := make(chan error, 1)

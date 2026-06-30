@@ -60,8 +60,8 @@
     },
     "/healthz": {
       "get": {
-        "summary": "Health check",
-        "description": "Returns 200 OK when the server is running.",
+        "summary": "Liveness check",
+        "description": "Returns 200 OK when the HTTP server is running. Does not check downstream dependencies.",
         "operationId": "healthz",
         "responses": {
           "200": {
@@ -74,6 +74,51 @@
                     "status": {
                       "type": "string",
                       "example": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "summary": "Readiness check",
+        "description": "Returns 200 OK when the kubo node is reachable, or 503 when it is not. Use this to gate traffic (e.g. Kubernetes readiness probe).",
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "Server is ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A downstream dependency (kubo) is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "unhealthy"
+                    },
+                    "error": {
+                      "type": "string",
+                      "example": "ipfs: id request: dial tcp 127.0.0.1:5001: connect: connection refused"
                     }
                   }
                 }
