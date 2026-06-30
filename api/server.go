@@ -101,7 +101,7 @@ func New(
 
 	s.srv = &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      s.logRequests(mux),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
@@ -122,6 +122,41 @@ func (s *Server) ListenAndServe() error {
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
+}
+
+// ─── Middleware ───────────────────────────────────────────────────────────────
+
+// statusRecorder wraps http.ResponseWriter to capture the status code written
+// by the handler, so the logging middleware can report it.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests logs every HTTP request once it completes, recording method,
+// path, response status, duration and remote address.
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		// Default to 200; WriteHeader updates it if the handler sets another code.
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		next.ServeHTTP(rec, r)
+
+		s.log.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"duration", time.Since(start),
+			"remote", r.RemoteAddr,
+			"length", r.ContentLength,
+		)
+	})
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────

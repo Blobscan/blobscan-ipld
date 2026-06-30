@@ -302,6 +302,33 @@ curl http://localhost:8080/healthz
 
 ---
 
+## Request logging
+
+Every HTTP request is logged once it completes, via a logging middleware that
+wraps all routes (including `/healthz`, `/docs`, and `/openapi.json`). Each log
+line is emitted at `INFO` level with the message `http request` and the
+following fields:
+
+| Field      | Description                                  |
+|------------|----------------------------------------------|
+| `method`   | HTTP method (e.g. `POST`, `GET`)             |
+| `path`     | Request path (e.g. `/blob`)                  |
+| `status`   | Response status code (e.g. `201`, `400`)     |
+| `duration` | Time spent handling the request              |
+| `remote`   | Remote address of the caller                 |
+| `length`   | Request body length in bytes (`-1` if unknown, e.g. chunked) |
+
+Example:
+
+```
+level=INFO msg="http request" method=POST path=/blob status=201 duration=42ms remote=10.0.0.5:54321 length=262500
+```
+
+This is in addition to the handler-specific logs (e.g. processing failures and
+epoch finalization).
+
+---
+
 ## Push workflows
 
 ### 1. Manual finalize (explicit CLI call)
