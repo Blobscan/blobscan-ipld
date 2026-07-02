@@ -24,6 +24,7 @@ import (
 	"github.com/blobscan/blobscan-ipld/db"
 	"github.com/blobscan/blobscan-ipld/generator"
 	"github.com/blobscan/blobscan-ipld/ipfs"
+	"github.com/blobscan/blobscan-ipld/metrics"
 	"github.com/blobscan/blobscan-ipld/store"
 	"github.com/blobscan/blobscan-ipld/types"
 
@@ -217,7 +218,13 @@ func cmdServe(ctx context.Context, cfg *config.Config, log *slog.Logger, args []
 		listen = ":8080"
 	}
 
-	srv := api.New(listen, gen.ProcessBlobInput, gen.FinalizeEpochWithCID, gen.Ping, log)
+	// Prometheus metrics: attach live instruments to the generator and register
+	// the scrape-time snapshot collector, then serve both at GET /metrics.
+	m := metrics.New()
+	gen.WithMetrics(m)
+	m.RegisterSnapshot(gen.MetricsSnapshot)
+
+	srv := api.New(listen, gen.ProcessBlobInput, gen.FinalizeEpochWithCID, gen.Ping, m.Handler(), m.ObserveHTTPRequest, log)
 
 	// Start API server in background.
 	srvErr := make(chan error, 1)

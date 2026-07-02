@@ -24,6 +24,10 @@ export $(grep -v '^#' .env | xargs)
 ./blobscan-ipld serve
 ```
 
+The `serve` command also exposes Prometheus metrics at `GET /metrics` and
+liveness/readiness probes at `GET /healthz` and `GET /readyz`. See
+[docs/operations.md](docs/operations.md#metrics) for the metric list.
+
 ## How it works
 
 ### Beacon-pull mode (`run`)
@@ -80,7 +84,7 @@ blobscan-ipld/
 ├── cmd/blobscan-ipld/main.go   CLI entry point; subcommands: run, serve, epoch, finalize-epoch, export-car, export-car-range
 ├── config/config.go            Env-var loader, validation, defaults
 ├── types/types.go              Pure domain types — no IPLD imports
-├── api/server.go               HTTP push API server (POST /blob, GET /healthz)
+├── api/server.go               HTTP push API server (POST /blob; GET /healthz, /readyz, /metrics, /docs, /openapi.json)
 ├── db/db.go                    PostgreSQL client: schema migration, SaveBlobs, SaveEpoch, state backend
 ├── store/
 │   ├── blockstore.go           Thread-safe in-memory blockstore (MemBlockstore)

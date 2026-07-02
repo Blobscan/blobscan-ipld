@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -73,6 +74,11 @@ type EpochFinalizer func(ctx context.Context, epoch uint64) (epochCID string, er
 // (notably the kubo node) are reachable. A nil error means ready.
 type ReadinessChecker func(ctx context.Context) error
 
+// HTTPObserver records one completed request's latency. It is called by the
+// logging middleware once the response status and duration are known. path is
+// the matched route pattern (not the raw URL) to keep label cardinality bounded.
+type HTTPObserver func(method, path, status string, dur time.Duration)
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 // Server is the HTTP API server.
@@ -80,6 +86,7 @@ type Server struct {
 	processor BlobProcessor
 	finalizer EpochFinalizer
 	ready     ReadinessChecker
+	observe   HTTPObserver
 	log       *slog.Logger
 	srv       *http.Server
 }
@@ -87,17 +94,22 @@ type Server struct {
 // New creates an API server.
 // finalizer may be nil; if nil, finalization via POST /blob is disabled.
 // ready may be nil; if nil, GET /readyz always reports ready.
+// metricsHandler may be nil; if nil, GET /metrics is not exposed.
+// observe may be nil; if nil, request latency is not recorded.
 func New(
 	addr string,
 	processor BlobProcessor,
 	finalizer EpochFinalizer,
 	ready ReadinessChecker,
+	metricsHandler http.Handler,
+	observe HTTPObserver,
 	log *slog.Logger,
 ) *Server {
 	s := &Server{
 		processor: processor,
 		finalizer: finalizer,
 		ready:     ready,
+		observe:   observe,
 		log:       log,
 	}
 
@@ -107,6 +119,9 @@ func New(
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /openapi.json", s.handleOpenAPISpec)
 	mux.HandleFunc("GET /docs", s.handleSwaggerUI)
+	if metricsHandler != nil {
+		mux.Handle("GET /metrics", metricsHandler)
+	}
 
 	s.srv = &http.Server{
 		Addr:         addr,
@@ -157,15 +172,39 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 
 		next.ServeHTTP(rec, r)
 
+		dur := time.Since(start)
 		s.log.Info("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,
-			"duration", time.Since(start),
+			"duration", dur,
 			"remote", r.RemoteAddr,
 			"length", r.ContentLength,
 		)
+
+		if s.observe != nil {
+			s.observe(r.Method, routeLabel(r.URL.Path), strconv.Itoa(rec.status), dur)
+		}
 	})
+}
+
+// knownRoutes is the set of fixed paths the server exposes. routeLabel maps any
+// path outside this set to "other" so the http_request_duration_seconds metric
+// cannot blow up its label cardinality on unmatched/probed URLs.
+var knownRoutes = map[string]struct{}{
+	"/blob":         {},
+	"/healthz":      {},
+	"/readyz":       {},
+	"/openapi.json": {},
+	"/docs":         {},
+	"/metrics":      {},
+}
+
+func routeLabel(path string) string {
+	if _, ok := knownRoutes[path]; ok {
+		return path
+	}
+	return "other"
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────

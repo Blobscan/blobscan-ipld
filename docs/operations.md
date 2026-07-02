@@ -1201,6 +1201,57 @@ time=2024-03-15T10:00:05Z level=INFO msg="■ Epoch 134500 built [45 blobs]" cid
 
 Note: `rpc_requests` shows cumulative request count since startup.
 
+### Metrics
+
+In `serve` mode the API exposes a Prometheus endpoint at `GET /metrics` on the
+`GENERATOR_API_LISTEN` address (`:8080` by default). No extra configuration is
+required. The endpoint is unauthenticated — restrict it at the ingress /
+reverse-proxy layer if the API is publicly exposed.
+
+Two kinds of series are exported:
+
+**Live in-process instruments** (updated by the pipeline; reset on restart):
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `blobscanipld_blobs_processed_total` | counter | `network`, `source` | Blobs processed. `source` = `live`, `backfill`, `push`, `backfill_ipfs`. |
+| `blobscanipld_epochs_processed_total` | counter | `network`, `source`, `result` | Epochs processed. `result` = `built`, `empty`, `skipped`, `failed`. |
+| `blobscanipld_epoch_build_duration_seconds` | histogram | `network` | Time to fetch and build an EpochNode (excludes IPFS upload). |
+| `blobscanipld_ipfs_upload_duration_seconds` | histogram | — | Time to upload one blockstore (epoch or blob) to IPFS. |
+| `blobscanipld_ipfs_blocks_uploaded_total` | counter | — | Total IPLD blocks uploaded to IPFS. |
+| `blobscanipld_ipfs_pin_total` | counter | `result` | Pin attempts. `result` = `ok`, `failed`, `skipped`. |
+| `blobscanipld_network_root_rebuild_duration_seconds` | histogram | — | Time to rebuild and upload the NetworkRoot. |
+| `blobscanipld_http_request_duration_seconds` | histogram | `method`, `path`, `status` | API request latency. `path` is the matched route (unknown paths collapse to `other`). |
+
+**Scrape-time gauges** (queried on every scrape; reflect durable state and survive restarts):
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `blobscanipld_epochs_indexed` | gauge | `network` | Epochs stored in the database. |
+| `blobscanipld_empty_epochs` | gauge | `network` | Indexed epochs with zero blobs. |
+| `blobscanipld_blobs_indexed_total` | gauge | `network` | Total blobs indexed. |
+| `blobscanipld_indexed_size_bytes` | gauge | `network` | Approximate total indexed blob-data size. |
+| `blobscanipld_first_epoch` / `blobscanipld_last_epoch` | gauge | `network` | Lowest / highest indexed epoch. |
+| `blobscanipld_epoch_gap_count` | gauge | `network` | Missing epochs between first and last indexed. |
+| `blobscanipld_live_cursor` / `blobscanipld_backfill_cursor` | gauge | `network` | Live / backfill processing cursors. |
+| `blobscanipld_ipfs_repo_size_bytes` | gauge | — | IPFS repository size. |
+| `blobscanipld_ipfs_storage_max_bytes` | gauge | — | IPFS configured maximum storage. |
+| `blobscanipld_beacon_rpc_requests_total` | counter | — | Cumulative RPC requests to the beacon node (same value as the `rpc_requests` log field). |
+| `blobscanipld_beacon_rpc_429_total` | counter | — | HTTP 429 (rate-limited) responses from the beacon node. |
+| `blobscanipld_scrape_db_up` / `blobscanipld_scrape_ipfs_up` | gauge | — | `1` if that backend was reachable during the last scrape, else `0`. The DB / IPFS / beacon series above are omitted when the corresponding backend is disabled or unreachable. |
+
+The standard Go runtime (`go_*`) and process (`process_*`) collectors are also
+exported.
+
+Sample Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: blobscan-ipld
+    static_configs:
+      - targets: ["blobscan-ipld:8080"]
+```
+
 ---
 
 ## Upgrading

@@ -293,7 +293,8 @@ curl -X POST http://localhost:8080/blob \
 
 ### `GET /healthz`
 
-Returns `200 OK` with `{"status":"ok"}` when the server is running.
+Liveness probe. Returns `200 OK` with `{"status":"ok"}` as long as the HTTP
+server is accepting requests, without touching any downstream dependency.
 
 ```bash
 curl http://localhost:8080/healthz
@@ -302,12 +303,43 @@ curl http://localhost:8080/healthz
 
 ---
 
+### `GET /readyz`
+
+Readiness probe. Verifies the kubo (IPFS) node is reachable. Returns `200 OK`
+with `{"status":"ok"}` when ready, or `503 Service Unavailable` with
+`{"status":"unhealthy","error":"..."}` when the node cannot be reached — so
+orchestrators can drain traffic instead of restarting the process. When IPFS
+upload is disabled (`IPFS_SKIP_UPLOAD=true`) there is nothing to verify and it
+always reports ready.
+
+```bash
+curl http://localhost:8080/readyz
+# {"status":"ok"}
+```
+
+---
+
+### `GET /metrics`
+
+Prometheus metrics in the standard text exposition format. Served on the same
+`GENERATOR_API_LISTEN` address as the rest of the API. See
+[Metrics](operations.md#metrics) in the operations guide for the full list of
+series. The endpoint has no authentication; restrict it at the ingress /
+reverse-proxy layer if the API is publicly exposed.
+
+```bash
+curl http://localhost:8080/metrics | grep blobscanipld_
+```
+
+---
+
 ## Request logging
 
 Every HTTP request is logged once it completes, via a logging middleware that
-wraps all routes (including `/healthz`, `/docs`, and `/openapi.json`). Each log
-line is emitted at `INFO` level with the message `http request` and the
-following fields:
+wraps all routes (including `/healthz`, `/readyz`, `/metrics`, `/docs`, and
+`/openapi.json`). The same middleware records request latency into the
+`blobscanipld_http_request_duration_seconds` metric. Each log line is emitted at
+`INFO` level with the message `http request` and the following fields:
 
 | Field      | Description                                  |
 |------------|----------------------------------------------|

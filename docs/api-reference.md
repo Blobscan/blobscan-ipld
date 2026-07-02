@@ -312,8 +312,9 @@ Implements `Backend`. Updates `last_processed_epoch` and persists atomically.
 
 ## Package `api`
 
-### `func New(addr string, processor BlobProcessor, finalizer EpochFinalizer, log *slog.Logger) *Server`
-Creates and configures the HTTP server. Routes: `POST /blob`, `GET /healthz`, `GET /openapi.json`, `GET /docs`.
+### `func New(addr string, processor BlobProcessor, finalizer EpochFinalizer, ready ReadinessChecker, metricsHandler http.Handler, observe HTTPObserver, log *slog.Logger) *Server`
+Creates and configures the HTTP server. Routes: `POST /blob`, `GET /healthz`, `GET /readyz`, `GET /metrics`, `GET /openapi.json`, `GET /docs`.
+`ready` may be `nil` (readiness always reports OK); `metricsHandler` may be `nil` (`/metrics` not registered); `observe` may be `nil` (request latency not recorded).
 `finalizer` may be `nil`; when nil, `finalize: true` in push requests is silently ignored (response has `finalized: false`).
 
 ### `func (s *Server) ListenAndServe() error`

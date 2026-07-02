@@ -24,6 +24,7 @@ import (
 	"github.com/blobscan/blobscan-ipld/config"
 	"github.com/blobscan/blobscan-ipld/db"
 	"github.com/blobscan/blobscan-ipld/ipfs"
+	"github.com/blobscan/blobscan-ipld/metrics"
 	"github.com/blobscan/blobscan-ipld/state"
 	"github.com/blobscan/blobscan-ipld/store"
 	"github.com/blobscan/blobscan-ipld/types"
@@ -38,6 +39,7 @@ type Generator struct {
 	db             *db.Client
 	state          state.Backend
 	notifier       *blobscan.Notifier // nil when blobscan.api_url is not configured
+	metrics        *metrics.Metrics   // nil when metrics are not enabled
 	log            *slog.Logger
 	genesisTime    time.Time // zero if not yet fetched or beacon unavailable
 	slotsPerEpoch  uint64
@@ -166,6 +168,62 @@ func (g *Generator) Close() {
 	if g.db != nil {
 		g.db.Close()
 	}
+}
+
+// WithMetrics attaches a Metrics instance so the pipeline emits Prometheus
+// instrumentation. Call before Run/serve. The generator is nil-safe without it.
+func (g *Generator) WithMetrics(m *metrics.Metrics) {
+	g.metrics = m
+}
+
+// MetricsSnapshot collects the current durable state for a Prometheus scrape:
+// DB summary stats, IPFS repo storage, and beacon RPC counters. Each backend is
+// optional; the Has* flags report which were reachable so the collector can
+// emit up/down series without failing the whole scrape.
+func (g *Generator) MetricsSnapshot(ctx context.Context) metrics.Snapshot {
+	var s metrics.Snapshot
+
+	if g.db != nil {
+		stats, err := g.db.GetSummaryStats(ctx, g.cfg.Network.Name)
+		if err != nil {
+			g.log.Warn("metrics: db summary stats failed", "err", err)
+		} else {
+			s.HasDB = true
+			s.DB = metrics.DBSnapshot{
+				Network:        g.cfg.Network.Name,
+				EpochsIndexed:  stats.EpochCount,
+				EmptyEpochs:    stats.EmptyEpochCount,
+				BlobsIndexed:   stats.TotalBlobs,
+				SizeBytes:      stats.TotalSizeBytes,
+				FirstEpoch:     stats.FirstEpoch,
+				LastEpoch:      stats.LastEpoch,
+				GapCount:       stats.GapCount,
+				LiveCursor:     stats.LiveCursor,
+				BackfillCursor: stats.BackfillCursor,
+			}
+		}
+	}
+
+	if g.ipfs != nil {
+		repo, err := g.ipfs.GetRepoStat(ctx, true)
+		if err != nil {
+			g.log.Warn("metrics: ipfs repo stat failed", "err", err)
+		} else {
+			s.HasIPFS = true
+			s.IPFS = metrics.IPFSSnapshot{
+				RepoSizeBytes:   repo.RepoSize,
+				StorageMaxBytes: repo.StorageMax,
+			}
+		}
+	}
+
+	if g.beacon != nil {
+		s.HasBeacon = true
+		s.BeaconRPCRequests = g.beacon.GetRPCRequestCount()
+		s.Beacon429s = g.beacon.Get429Count()
+	}
+
+	return s
 }
 
 // Ping reports whether the kubo node is reachable, for use as an API readiness
@@ -493,6 +551,7 @@ func (g *Generator) runBackfillPipeline(
 						return
 					}
 					if exists {
+						g.metrics.RecordEpoch(g.cfg.Network.Name, "backfill", "skipped")
 						resultCh <- buildResult{epoch: epoch, be: builtEpoch{epoch: epoch, skip: true}}
 						continue
 					}
@@ -646,6 +705,8 @@ type builtEpoch struct {
 // or, when the epoch has no blobs, one with empty=true.
 func (g *Generator) buildEpoch(ctx context.Context, epoch uint64, p *epochProgress) (builtEpoch, error) {
 	out := builtEpoch{epoch: epoch}
+	buildStart := time.Now()
+	source := progressSource(p)
 
 	var (
 		epochInp    types.EpochInput
@@ -689,6 +750,7 @@ func (g *Generator) buildEpoch(ctx context.Context, epoch uint64, p *epochProgre
 		if len(epochInp.Blobs) == 0 {
 			g.log.Info("epoch has no blobs, skipping", "epoch", epoch)
 			out.empty = true
+			g.metrics.RecordEpoch(g.cfg.Network.Name, source, "empty")
 			return out, nil
 		}
 
@@ -730,6 +792,10 @@ func (g *Generator) buildEpoch(ctx context.Context, epoch uint64, p *epochProgre
 	g.log.Info(fmt.Sprintf("%s Epoch %d built [%d blobs]", srcIcon, epoch, len(blobResults)),
 		"cid", epochResult.CID.String(),
 		"rpc_requests", rpcCount)
+
+	g.metrics.RecordEpoch(g.cfg.Network.Name, source, "built")
+	g.metrics.RecordBlobs(g.cfg.Network.Name, source, len(blobResults))
+	g.metrics.ObserveEpochBuild(g.cfg.Network.Name, time.Since(buildStart))
 
 	out.epochInp = epochInp
 	out.blobResults = blobResults
@@ -916,9 +982,12 @@ func (g *Generator) ProcessBlobInput(ctx context.Context, req api.BlobPushReques
 
 	// Upload just this blob's blocks to IPFS (skipped when ipfs is nil).
 	if blobBS != nil {
+		uploadStart := time.Now()
+		blockCount := blobBS.Len()
 		if err := g.ipfs.PutBlockstore(ctx, blobBS); err != nil {
 			return api.BlobPushResponse{}, fmt.Errorf("upload blob to ipfs: %w", err)
 		}
+		g.metrics.ObserveIPFSUpload(time.Since(uploadStart), blockCount)
 	}
 
 	// Persist blob record to DB (epoch row may not exist yet; SaveBlobs handles that).
@@ -927,6 +996,8 @@ func (g *Generator) ProcessBlobInput(ctx context.Context, req api.BlobPushReques
 			return api.BlobPushResponse{}, fmt.Errorf("save blob to db: %w", err)
 		}
 	}
+
+	g.metrics.RecordBlob(g.cfg.Network.Name, "push")
 
 	g.log.Info("blob pushed and stored",
 		"commitment", req.Commitment,
@@ -1124,9 +1195,11 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 			g.log.Debug("IPFS upload progress", "epoch", epoch, "blocks", fmt.Sprintf("%d/%d", current, count), "cid", blockCID)
 		}
 	}
+	uploadStart := time.Now()
 	if err := g.ipfs.PutBlockstore(ctx, bs, progress); err != nil {
 		return fmt.Errorf("upload epoch %d to IPFS: %w", epoch, err)
 	}
+	g.metrics.ObserveIPFSUpload(time.Since(uploadStart), total)
 	g.log.Debug("IPFS upload complete", "epoch", epoch, "blocks", total)
 	if g.cfg.IPFS.PinOnAdd {
 		// Verify the whole DAG is present locally before pinning. A recursive
@@ -1141,6 +1214,7 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 		if verifyErr != nil {
 			g.log.Warn("skipping pin: epoch DAG not fully present locally (non-fatal)",
 				"epoch", epoch, "cid", epochCID, "err", verifyErr)
+			g.metrics.RecordPin("skipped")
 			return nil
 		}
 		pinCtx, pinCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1148,6 +1222,9 @@ func (g *Generator) uploadAndPin(ctx context.Context, bs *store.MemBlockstore, e
 		pinCancel()
 		if err != nil {
 			g.log.Warn("pin epoch failed (non-fatal)", "epoch", epoch, "cid", epochCID, "err", err)
+			g.metrics.RecordPin("failed")
+		} else {
+			g.metrics.RecordPin("ok")
 		}
 	}
 	return nil
@@ -1165,6 +1242,7 @@ func (g *Generator) rebuildNetworkRoot(ctx context.Context) error {
 		g.log.Debug("skipping NetworkRoot rebuild: IPFS upload disabled")
 		return nil
 	}
+	rebuildStart := time.Now()
 	records, err := g.db.GetAllEpochs(ctx, g.cfg.Network.Name)
 	if err != nil {
 		return fmt.Errorf("load epochs for network root: %w", err)
@@ -1196,6 +1274,7 @@ func (g *Generator) rebuildNetworkRoot(ctx context.Context) error {
 		return fmt.Errorf("upload network root to IPFS: %w", err)
 	}
 
+	g.metrics.ObserveNetworkRootRebuild(time.Since(rebuildStart))
 	g.log.Debug("network root rebuilt", "cid", rootResult.CID, "epochs", len(epochResults),
 		"pages", rootResult.PageCount)
 	return nil
@@ -1518,6 +1597,15 @@ func hexDecode(s string) ([]byte, error) {
 	out := make([]byte, hex.DecodedLen(len(s)))
 	n, err := hex.Decode(out, []byte(s))
 	return out[:n], err
+}
+
+// progressSource returns the metrics "source" label for an epochProgress,
+// defaulting to "live" when unset (single-epoch CLI paths pass nil).
+func progressSource(p *epochProgress) string {
+	if p == nil || p.src == "" {
+		return "live"
+	}
+	return p.src
 }
 
 // pluralize returns the plural suffix for the given count.

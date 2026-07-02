@@ -127,6 +127,26 @@
           }
         }
       }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Prometheus metrics",
+        "description": "Exposes live pipeline instruments and scrape-time gauges in the Prometheus text exposition format. See docs/operations.md#metrics for the full list of series.",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "Metrics in Prometheus text exposition format",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "example": "# HELP blobscanipld_blobs_processed_total Total blobs processed by the pipeline, by network and source.\nblobscanipld_blobs_processed_total{network=\"mainnet\",source=\"live\"} 42\n"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

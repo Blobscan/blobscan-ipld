@@ -47,6 +47,7 @@ type Client struct {
 	backoffDuration time.Duration // current backoff duration
 	mu              sync.Mutex
 	rpcRequests     int64  // counter for total RPC requests made to beacon node
+	rpc429          int64  // counter for total HTTP 429 (rate limited) responses
 	slotsPerEpoch   uint64 // consensus slots per epoch (32 for Ethereum, 16 for Gnosis)
 	secondsPerSlot  uint64 // consensus seconds per slot (12 for Ethereum, 5 for Gnosis)
 }
@@ -453,6 +454,7 @@ func (c *Client) get(ctx context.Context, url string, out interface{}) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		body, _ := io.ReadAll(resp.Body)
 		c.mu.Lock()
+		c.rpc429++
 		// Double the backoff duration on each 429, cap at 60s
 		if c.backoffDuration == 0 {
 			c.backoffDuration = c.backoffBase
@@ -489,6 +491,14 @@ func (c *Client) GetRPCRequestCount() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.rpcRequests
+}
+
+// Get429Count returns the total number of HTTP 429 (rate limited) responses
+// received from the beacon node.
+func (c *Client) Get429Count() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rpc429
 }
 
 func isNotFound(err error) bool {
