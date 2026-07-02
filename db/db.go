@@ -204,6 +204,16 @@ func (c *Client) SaveBlobs(ctx context.Context, network string, epoch uint64, bl
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	// Ensure the parent epoch row exists before inserting blobs (FK constraint).
+	// Uses DO NOTHING so a real epoch row written by FinalizeEpoch is never overwritten.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO ipld_epochs (epoch, network, slot, cid, car_path, blob_count, size_bytes)
+		VALUES ($1, $2, $3, '', '', 0, 0)
+		ON CONFLICT (epoch) DO NOTHING
+	`, int64(epoch), network, int64(epoch)*32); err != nil {
+		return fmt.Errorf("db: ensure epoch row %d: %w", epoch, err)
+	}
+
 	// Temp table mirrors ipld_blobs' column set (excluding created_at, which
 	// defaults to NOW() on the upsert into the real table).
 	if _, err := tx.Exec(ctx, `

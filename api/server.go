@@ -302,7 +302,7 @@ func (s *Server) handlePushBlob(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.processor(r.Context(), req)
 	if err != nil {
-		s.log.Error("blob processing failed", "commitment", req.Commitment, "epoch", req.Epoch, "err", err)
+		s.log.Error("blob processing failed", "err", err, "commitment", req.Commitment, "epoch", req.Epoch)
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("processing failed: %s", err))
 		return
 	}
