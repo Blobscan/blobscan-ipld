@@ -54,7 +54,7 @@ func New() *Metrics {
 		blobsProcessed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "blobs_processed_total",
-			Help:      "Total blobs processed by the pipeline, by network and source.",
+			Help:      "Total blobs processed by the pipeline, by network and source (live/backfill/push/backfill-ipfs).",
 		}, []string{"network", "source"}),
 		epochsProcessed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
@@ -228,9 +228,9 @@ type IPFSSnapshot struct {
 // flags indicate whether the corresponding backend was reachable so the
 // collector can emit up/down series and skip stale gauges.
 type Snapshot struct {
-	DB     DBSnapshot
-	HasDB  bool
-	IPFS   IPFSSnapshot
+	DB      DBSnapshot
+	HasDB   bool
+	IPFS    IPFSSnapshot
 	HasIPFS bool
 
 	BeaconRPCRequests int64
@@ -249,21 +249,21 @@ type SnapshotFunc func(ctx context.Context) Snapshot
 type snapshotCollector struct {
 	snap SnapshotFunc
 
-	epochsIndexed   *prometheus.Desc
-	emptyEpochs     *prometheus.Desc
-	blobsIndexed    *prometheus.Desc
-	sizeBytes       *prometheus.Desc
-	firstEpoch      *prometheus.Desc
-	lastEpoch       *prometheus.Desc
-	gapCount        *prometheus.Desc
-	liveCursor      *prometheus.Desc
-	backfillCursor  *prometheus.Desc
-	repoSize        *prometheus.Desc
-	storageMax      *prometheus.Desc
-	beaconRequests  *prometheus.Desc
-	beacon429s      *prometheus.Desc
-	scrapeDBUp      *prometheus.Desc
-	scrapeIPFSUp    *prometheus.Desc
+	epochsIndexed  *prometheus.Desc
+	emptyEpochs    *prometheus.Desc
+	blobsIndexed   *prometheus.Desc
+	sizeBytes      *prometheus.Desc
+	firstEpoch     *prometheus.Desc
+	lastEpoch      *prometheus.Desc
+	gapCount       *prometheus.Desc
+	liveCursor     *prometheus.Desc
+	backfillCursor *prometheus.Desc
+	repoSize       *prometheus.Desc
+	storageMax     *prometheus.Desc
+	beaconRequests *prometheus.Desc
+	beacon429s     *prometheus.Desc
+	scrapeDBUp     *prometheus.Desc
+	scrapeIPFSUp   *prometheus.Desc
 }
 
 func fqName(name string) string { return namespace + "_" + name }

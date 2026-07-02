@@ -183,7 +183,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		)
 
 		if s.observe != nil {
-			s.observe(r.Method, routeLabel(r.URL.Path), strconv.Itoa(rec.status), dur)
+			s.observe(methodLabel(r.Method), routeLabel(r.URL.Path), strconv.Itoa(rec.status), dur)
 		}
 	})
 }
@@ -203,6 +203,23 @@ var knownRoutes = map[string]struct{}{
 func routeLabel(path string) string {
 	if _, ok := knownRoutes[path]; ok {
 		return path
+	}
+	return "other"
+}
+
+// knownMethods is the set of HTTP methods the server handles. methodLabel maps
+// any other verb to "other": the logging middleware runs before mux routing, so
+// a client can send an arbitrary method string (which the mux then rejects with
+// 405). Without this guard each distinct verb would create a new
+// http_request_duration_seconds time series and grow the vector without bound.
+var knownMethods = map[string]struct{}{
+	http.MethodGet:  {},
+	http.MethodPost: {},
+}
+
+func methodLabel(method string) string {
+	if _, ok := knownMethods[method]; ok {
+		return method
 	}
 	return "other"
 }

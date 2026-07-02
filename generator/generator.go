@@ -1511,6 +1511,9 @@ func (g *Generator) BackfillIPFS(ctx context.Context, fromEpoch, toEpoch uint64)
 			"rpc_requests", rpcCount,
 		)
 
+		g.metrics.RecordEpoch(g.cfg.Network.Name, "backfill-ipfs", "built")
+		g.metrics.RecordBlobs(g.cfg.Network.Name, "backfill-ipfs", len(blobResults))
+
 		// Upload all blocks (blob data + metadata + epoch node + HAMT) to IPFS.
 		// Retry indefinitely on transient errors (e.g. IPFS node not yet reachable).
 		// block/put is idempotent on Kubo, so retrying a partial upload is safe.

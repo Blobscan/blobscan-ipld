@@ -95,6 +95,23 @@ func TestMetricsEndpointServed(t *testing.T) {
 	}
 }
 
+func TestRouteAndMethodLabelsBounded(t *testing.T) {
+	// Both helpers must collapse unknown values to "other" so the metric
+	// label cardinality cannot be driven up by arbitrary paths or verbs.
+	if got := routeLabel("/blob"); got != "/blob" {
+		t.Errorf("routeLabel(/blob) = %q, want /blob", got)
+	}
+	if got := routeLabel("/../etc/passwd"); got != "other" {
+		t.Errorf("routeLabel(unknown) = %q, want other", got)
+	}
+	if got := methodLabel("GET"); got != "GET" {
+		t.Errorf("methodLabel(GET) = %q, want GET", got)
+	}
+	if got := methodLabel("BADMETHOD"); got != "other" {
+		t.Errorf("methodLabel(unknown) = %q, want other", got)
+	}
+}
+
 func TestMetricsEndpointDisabledWhenNil(t *testing.T) {
 	// With a nil metrics handler, /metrics must not be registered (404).
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))

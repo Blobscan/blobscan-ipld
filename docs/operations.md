@@ -1214,7 +1214,7 @@ Two kinds of series are exported:
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `blobscanipld_blobs_processed_total` | counter | `network`, `source` | Blobs processed. `source` = `live`, `backfill`, `push`, `backfill_ipfs`. |
+| `blobscanipld_blobs_processed_total` | counter | `network`, `source` | Blobs processed. `source` = `live`, `backfill`, `push`, `backfill-ipfs`. |
 | `blobscanipld_epochs_processed_total` | counter | `network`, `source`, `result` | Epochs processed. `result` = `built`, `empty`, `skipped`, `failed`. |
 | `blobscanipld_epoch_build_duration_seconds` | histogram | `network` | Time to fetch and build an EpochNode (excludes IPFS upload). |
 | `blobscanipld_ipfs_upload_duration_seconds` | histogram | — | Time to upload one blockstore (epoch or blob) to IPFS. |
