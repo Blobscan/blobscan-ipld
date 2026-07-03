@@ -966,6 +966,165 @@ CREATE INDEX <index_name> ON blob_data_storage_reference (...);
 
 ---
 
+## Case study: migrating ~20M blob refs into a blobscan DB on Kubernetes
+
+In July 2026 the full mainnet index built on a standalone server
+(187,015 epochs / 20,090,012 blobs / 2.4 TiB of blob data on IPFS) was imported
+into the staging blobscan instance running on Kubernetes (CloudNativePG
+cluster on DigitalOcean). This section records the exact steps that worked,
+and — equally important — the approaches that failed, so the production
+import can skip the dead ends.
+
+### Final working procedure
+
+**1. Export in binary COPY format on the source machine:**
+
+```bash
+docker compose -f docker-compose.all.yml run --rm mainnet \
+  export-blob-refs -binary -out /car/all_refs.bin
+# 19,839,937 rows → 2.7 GB
+```
+
+**2. Ship the file via S3-compatible storage + presigned URL.**
+Direct paths into the cluster all failed for a GB-scale file (see
+"Difficulties" below). What worked: upload to S3, generate a
+presigned URL, download from inside the cluster:
+
+```bash
+s3cmd put all_refs.bin s3://bucket/all_refs.bin
+s3cmd signurl s3://bucket/all_refs.bin +86400
+```
+
+**3. Load and merge from a Kubernetes Job.**
+Run the import as a `Job` (not `kubectl exec` — see difficulties), using the
+CNPG **superuser** credentials from the `<cluster>-superuser` secret. The
+job downloads the file, `\COPY`s it into a persistent staging table, and
+merges it into `blob_data_storage_reference`:
+
+```sh
+# inside a postgres:17-alpine Job container
+wget -q -O /tmp/refs.bin "<presigned-url>"
+
+psql -h <cluster>-rw -U postgres -d <blobscan_db> <<'SQL'
+CREATE TABLE refs_stage (
+  blob_hash      TEXT NOT NULL,
+  storage        TEXT NOT NULL,
+  data_reference TEXT NOT NULL
+);
+SQL
+
+psql -h <cluster>-rw -U postgres -d <blobscan_db> \
+  -c "\COPY refs_stage FROM '/tmp/refs.bin' WITH (FORMAT BINARY)"
+
+psql -h <cluster>-rw -U postgres -d <blobscan_db> <<'SQL'
+CREATE INDEX IF NOT EXISTS refs_stage_blob_hash_idx ON refs_stage(blob_hash);
+
+-- Big work_mem: the 20M x 20M hash join runs in a few batches instead of
+-- spilling hundreds of temp files (default work_mem is 4MB).
+SET work_mem = '256MB';
+-- Skip per-row FK trigger checks; the JOIN already guarantees the parent
+-- blob row exists. Requires superuser.
+SET session_replication_role = replica;
+-- Keep autovacuum from competing for I/O during the load.
+ALTER TABLE blob_data_storage_reference SET (autovacuum_enabled = false);
+
+-- ORDER BY is the critical line: sorted input walks the target PK btree
+-- (blob_hash, storage) with locality instead of ~19M random cold-page
+-- reads on network-attached storage.
+INSERT INTO blob_data_storage_reference (blob_hash, storage, data_reference)
+SELECT r.blob_hash, r.storage::blob_storage, r.data_reference
+FROM refs_stage r
+INNER JOIN blob b ON b.versioned_hash = r.blob_hash
+ORDER BY r.blob_hash
+ON CONFLICT DO NOTHING;
+
+ALTER TABLE blob_data_storage_reference SET (autovacuum_enabled = true);
+ANALYZE blob_data_storage_reference;
+SQL
+```
+
+Result: `INSERT 0 19827501` in ~50 minutes (16 GB of WAL). Total IPFS refs
+after the merge: 20,133,248.
+
+**4. Clean up:** `DROP TABLE refs_stage;` (reclaims ~5 GB incl. index) and
+delete the Job.
+
+### Monitoring progress
+
+The INSERT is a single transaction — `SELECT COUNT(*)` on the target table
+does **not** move until commit, which makes a healthy load look stuck.
+Track WAL generation instead (take the baseline LSN when the job starts):
+
+```sql
+SELECT pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), '<baseline_lsn>'));
+```
+
+Steady growth (~0.5 GB/min in this run) means rows are flowing. Also watch
+`pg_stat_activity`: `wait_event = DataFileRead` is fine; `Lock /
+transactionid` or `Lock / relation` means a stale session is in the way.
+
+### Difficulties encountered (read before the production run)
+
+1. **`kubectl cp` and `kubectl exec` stdin streaming cannot move GB-scale
+   files.** Both ride the API server's websocket and died repeatedly with
+   `websocket: close 1006 (abnormal closure)` after a few hundred MB.
+   `kubectl port-forward` + local `psql \COPY` also dropped mid-transfer.
+   Hence the S3 + presigned URL detour — a plain in-cluster HTTP download
+   is not throttled by the API server at all.
+
+2. **CNPG pods have a read-only root filesystem.** `/tmp` in the postgres
+   pod is not writable; the only writable paths are the data and WAL
+   volumes. Downloading into a separate Job pod sidesteps this entirely.
+
+3. **Deleting a Kubernetes Job does NOT kill its Postgres backend.** Every
+   aborted attempt left its `INSERT` session running server-side, holding
+   locks that blocked the next attempt (`Lock / transactionid`). Always
+   check `pg_stat_activity` after deleting a job and
+   `pg_terminate_backend()` leftovers before retrying.
+
+4. **Use the right enum cast.** Prisma maps the `BlobStorage` enum to a
+   lowercase Postgres type: the cast is `storage::blob_storage`, not
+   `storage::"BlobStorage"` (the latter fails with *type "BlobStorage" does
+   not exist*).
+
+5. **The app role cannot bypass FK triggers.** `SET session_replication_role
+   = replica` and `ALTER TABLE ... DISABLE TRIGGER ALL` both fail with
+   *permission denied* as the `blobscan` role. Use the CNPG superuser
+   (secret `<cluster>-superuser`, user `postgres`).
+
+6. **Stale planner stats hid the real workload.** `pg_stat_user_tables`
+   claimed `blob` had ~1M rows; it actually had ~20M (the staging blobscan
+   had long been fully indexed via its own indexer with google refs). The
+   merge was therefore a 19.8M-row insert, not a 300K one — which changes
+   every tuning decision. `EXPLAIN` (whose estimates come from a different,
+   fresher path) revealed the true row count.
+
+7. **The actual bottleneck was random btree I/O, not the join.** With
+   `shared_buffers = 128MB` and a multi-GB PK index on the target table,
+   inserting rows in hash order means a cold random page read per row from
+   network-attached storage (weeks at the observed rate). A correlated
+   `EXISTS` subquery, a plain hash join, and FK-trigger disabling all
+   failed to fix it because none of them addressed insertion order.
+   **`ORDER BY r.blob_hash` on the INSERT was the fix** — plus
+   `work_mem = '256MB'` so the preceding hash join didn't spill into
+   hundreds of temp-file batches.
+
+8. **Temp spill filled the data volume.** The first hash-join attempt died
+   with *No space left on device*: with 4MB `work_mem` the join spilled
+   multi-GB temp files onto a data volume that was already 91% full. The
+   volume was resized 60 → 100Gi (`databases/values/staging-db.yaml` in
+   blobscan-infra, applied with `helmfile apply`; DigitalOcean expands PVCs
+   online, no pod restart).
+
+9. **The WAL volume resize turned out to be unnecessary.** We preemptively
+   grew it 10 → 30Gi fearing 16 GB of WAL from one transaction, but CNPG
+   archives and recycles WAL segments continuously — usage peaked around
+   ~15% (4 GB) even while 16 GB of WAL flowed through. The volume that
+   actually needs headroom is the **data** volume: temp spill files plus
+   the target table roughly doubling (8 → ~16 GB with its indexes).
+
+---
+
 ## Backfilling historical epochs
 
 Use the `epoch` subcommand to process a single epoch and exit. This is useful for:
