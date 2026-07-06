@@ -16,7 +16,7 @@ services:
 
   ipfs:
     image: ipfs/kubo:latest
-    restart: unless-stopped
+    restart: always
     environment:
       IPFS_PROFILE: "server,pebbleds"
       GOLOG_LOG_LEVEL: "info"
