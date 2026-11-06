@@ -131,6 +131,18 @@ This adds a second `ports` entry in the Compose file alongside the existing
 docker compose up -d --force-recreate ipfs
 ```
 
+> **Warning — reboots:** Docker starts `restart: always` containers as soon as
+> the daemon is up, which is often *before* Tailscale/the VPN has assigned the
+> extra bind IP. The port bind then fails and the container can end up running
+> with **no network at all** (see
+> [IPFS node has no network after reboot](#ipfs-node-has-no-network-after-a-reboot-network-is-unreachable)).
+> Allow binding to not-yet-present addresses on the host to avoid it:
+>
+> ```bash
+> echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-nonlocal-bind.conf
+> sudo sysctl --system
+> ```
+
 #### Allow non-localhost API clients (Kubo access control)
 
 Kubo silently drops connections from non-`127.0.0.1` origins unless
@@ -1123,6 +1135,82 @@ transactionid` or `Lock / relation` means a stale session is in the way.
    actually needs headroom is the **data** volume: temp spill files plus
    the target table roughly doubling (8 → ~16 GB with its indexes).
 
+### Follow-on: promoting the `ipfs` refs from staging → production (2026-07-23)
+
+The July import above loaded the full IPFS ref set into the **staging**
+blobscan DB (`blobscan_mainnet_staging`). Promoting those `storage='ipfs'`
+rows into **production** (`blobscan_mainnet_prod`) is a different shape of
+transfer with one big simplification and a couple of new wrinkles.
+
+**Key simplification — skip S3 entirely.** Both DBs are CNPG clusters in the
+*same* Kubernetes cluster (namespaces `staging` and `mainnet`), so a Job pod
+can reach both primaries over ClusterIP. The whole S3 / presigned-URL detour
+(needed only because the July source was an external server) is unnecessary —
+stream pod-to-pod with a single piped `\copy`, no file ever touching disk:
+
+```sh
+# inside a postgres:17-alpine Job in the mainnet namespace
+SRC=postgresql://postgres:***@blobscan-staging-db-cluster-rw.staging.svc:5432/blobscan_mainnet_staging
+DST=postgresql://postgres:***@blobscan-mainnet-db-cluster-rw.mainnet.svc:5432/blobscan_mainnet_prod
+
+# 1. stream only the ipfs rows into a persistent staging table (BINARY, no disk)
+psql "$SRC" -c "\copy (SELECT blob_hash, storage::text, data_reference FROM blob_data_storage_reference WHERE storage='ipfs') TO STDOUT (FORMAT binary)" \
+| psql "$DST" -c "\copy refs_stage FROM STDIN (FORMAT binary)"
+
+# 2. same tuned merge as the case study (superuser, ORDER BY pk, DO NOTHING)
+psql "$DST" <<'SQL'
+CREATE INDEX IF NOT EXISTS refs_stage_blob_hash_idx ON refs_stage(blob_hash);
+SET work_mem = '256MB';
+SET session_replication_role = replica;
+ALTER TABLE blob_data_storage_reference SET (autovacuum_enabled = false);
+INSERT INTO blob_data_storage_reference (blob_hash, storage, data_reference)
+SELECT r.blob_hash, r.storage::blob_storage, r.data_reference
+FROM refs_stage r
+INNER JOIN blob b ON b.versioned_hash = r.blob_hash
+ORDER BY r.blob_hash
+ON CONFLICT (blob_hash, storage) DO NOTHING;
+ALTER TABLE blob_data_storage_reference SET (autovacuum_enabled = true);
+ANALYZE blob_data_storage_reference;
+SQL
+```
+
+Result: streamed **20,748,315** rows pod-to-pod in ~90 s; the merge committed
+`INSERT 0 20200521` (the rest were `DO NOTHING` skips — hashes prod already
+had) in ~55 min / ~21 GB WAL. Prod `ipfs` refs: 547,185 → **20,749,328**.
+
+**New wrinkles vs. the case study:**
+
+1. **Cross-namespace secret.** The Job runs in `mainnet` but needs the
+   *staging* cluster's superuser password, and k8s secrets don't cross
+   namespaces. Copy it into the mainnet namespace first (delete it after):
+   ```bash
+   kubectl -n staging get secret blobscan-staging-db-cluster-superuser \
+     -o jsonpath='{.data.password}' | base64 -d   # → copy into a mainnet-ns secret
+   ```
+2. **The merge runs longer than the July 50 min.** The production target
+   table already held ~21M rows (`google` + `weavevm` + `ipfs`) sharing the
+   `(blob_hash, storage)` PK btree, so the sorted-insert walk touches a much
+   larger, colder index than staging's near-empty table did. ~55 min here.
+   Still `IO/DataFileRead`, still healthy — just longer.
+3. **A post-load autovacuum blocks the verification `COUNT(*)`.** As soon as
+   the Job re-enables autovacuum, a ~15-min `VACUUM blob_data_storage_reference`
+   runs to set the visibility map on 20M new pages, and it starves a full-scan
+   `count(*)` of I/O (the planner uses a parallel **seq scan**, not the storage
+   index, for `storage='ipfs'`). Don't fight it — the Job's own in-transaction
+   verify (`dst ipfs rows(after)=…`) already prints the authoritative count at
+   commit, before the vacuum starts. Cross-check with `pg_class.reltuples`
+   instead of a live count if you need a number while the vacuum runs.
+4. **Set `backoffLimit: 0`.** Same reason as case-study gotcha #3 — an
+   auto-retried Job would spawn a second `INSERT` that blocks on the first's
+   locks. On a clean exit no backend is left behind; if you *do* abort, check
+   `pg_stat_activity` for leftover `refs_stage`/`INSERT` sessions and
+   `pg_terminate_backend()` them before retrying.
+
+The count drifting up slightly between copy and verify (staging had
+20,748,315; prod ended at 20,749,328) is just the live prod indexer writing
+new `ipfs` refs during the ~55-min run — expected for a point-in-time bulk
+copy.
+
 ---
 
 ## Backfilling historical epochs
@@ -1505,3 +1593,59 @@ Fixes:
   `repair-epochs` can pin successfully.
 - If you do not want pins to wait on the network at all, pin offline or disable
   `pin_on_add` and pin separately (see [Pinning strategies](#pinning-strategies)).
+
+### IPFS node has no network after a reboot ("network is unreachable")
+
+Symptoms — Kubo logs flood with DNS/dial failures and bootstrap gives up,
+while the container still reports `healthy` (the `ipfs id` healthcheck does not
+need the network):
+
+```
+WARN swarm2 Failed to resolve addr {"addr": "/dnsaddr/bootstrap.libp2p.io",
+  "err": {"Err":"dial udp 1.1.1.1:53: connect: network is unreachable", ...}}
+ERROR cmd/ipfs failed to bootstrap (no peers found): consider updating Bootstrap or Peering section of your config
+```
+
+"network is unreachable" (rather than a timeout) means the container has no
+route out at all — it is not a DNS, Kubo config or peer problem.
+
+Diagnose on the host:
+
+```bash
+# Empty "{}" = the container is not attached to any Docker network
+docker inspect -f '{{json .NetworkSettings.Networks}}' blobscan-ipld-ipfs-1
+
+# Why the network setup failed at boot
+journalctl -b -u docker --no-pager | grep -iE 'failed to (start|bind|set up)'
+```
+
+Root cause seen on `tango` (2026-11-06): after a host reboot Docker started the
+ipfs container before Tailscale was up. The `IPFS_API_EXTRA_BIND` port
+(`100.90.1.2:5001`, the `tailscale0` address) could not be bound yet:
+
+```
+failed to set up container networking: driver failed programming external
+connectivity on endpoint blobscan-ipld-ipfs-1: failed to bind host port
+100.90.1.2:5001/tcp: cannot assign requested address
+```
+
+The container was then started again and came up attached to no network (loopback only).
+Host networking, IP forwarding and Docker's nftables rules were all fine.
+
+Fix (once the bind IP exists — check with `ip -br addr | grep tailscale0`):
+
+```bash
+docker compose up -d --force-recreate ipfs   # data lives in the volume; safe
+```
+
+Prevent it on the next reboot — let Docker bind addresses that are not yet
+assigned:
+
+```bash
+echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-nonlocal-bind.conf
+sudo sysctl --system
+```
+
+Ordering `docker.service` after `tailscaled.service` (systemd drop-in with
+`After=`/`Wants=tailscaled.service`) is an alternative, but less reliable:
+tailscaled can be running before the IP is actually assigned.
